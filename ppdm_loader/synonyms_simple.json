@@ -1,0 +1,44 @@
+{
+  "area": {
+    "STATE": [
+      "STATE",
+      "STATE_NAME",
+      "STATE_ABBR",
+      "STATE_CODE"
+    ],
+    "COUNTY": [
+      "COUNTY",
+      "COUNTY_NAME",
+      "COUNTY_NM",
+      "CNTY_NAME"
+    ]
+  },
+  "well": {
+    "WELL": [
+      "WELL",
+      "WELL_NAME",
+      "WELL_ID",
+      "API_WELL_NUMBER"
+    ],
+    "API": [
+      "API",
+      "API_NUMBER",
+      "API14",
+      "API12"
+    ]
+  },
+  "location": {
+    "LATITUDE": [
+      "LAT",
+      "LATITUDE",
+      "LAT_DEC",
+      "Y_COORD"
+    ],
+    "LONGITUDE": [
+      "LON",
+      "LONGITUDE",
+      "LNG",
+      "X_COORD"
+    ]
+  }
+}

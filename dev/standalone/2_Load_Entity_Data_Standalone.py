@@ -1,0 +1,890 @@
+# 2_Load_Entity_Data_standalone3.py
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+import pyodbc
+
+import ppdm_loader.db as db
+from ppdm_loader.stage import save_upload, stage_bulk_insert, DELIM_MAP
+from ppdm_loader.normalize import build_primary_norm_view_sql
+from ppdm_loader.fk_introspect import introspect_fk_by_child_col
+from ppdm_loader.fk_suggest import suggest_fk_candidates_step4
+
+
+# ============================================================
+# Page setup
+# ============================================================
+st.set_page_config(page_title="Load entity data (standalone)", layout="wide")
+
+BULK_DIR = Path(r"C:\Bulk\uploads")
+BULK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# Connection helpers (standalone only)
+# ============================================================
+def _connect_master(server: str) -> pyodbc.Connection:
+    return pyodbc.connect(
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+        f"SERVER={server};"
+        "DATABASE=master;"
+        "Trusted_Connection=yes;"
+        "Encrypt=no;",
+        autocommit=True,
+    )
+
+
+def _connect_db(server: str, database: str) -> pyodbc.Connection:
+    return pyodbc.connect(
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        "Trusted_Connection=yes;"
+        "Encrypt=no;",
+        autocommit=True,
+    )
+
+
+def _list_databases(conn: pyodbc.Connection) -> list[str]:
+    df = pd.read_sql(
+        "SELECT name FROM sys.databases WHERE state_desc='ONLINE' ORDER BY name",
+        conn,
+    )
+    return df["name"].astype(str).tolist() if df is not None else []
+
+
+def _sidebar_connect() -> pyodbc.Connection | None:
+    """
+    SINGLE connection UI for standalone mode.
+    Owns st.session_state['conn'] and st.session_state['db_list'].
+    """
+    ss = st.session_state
+    ss.setdefault("server", r"PERRY\SQLEXPRESS")
+    ss.setdefault("db_list", [])
+    ss.setdefault("database", "")
+    ss.setdefault("conn", None)
+
+    with st.sidebar:
+        st.header("Database Connection (Standalone)")
+
+        st.text_input("Server", key="server")
+
+        c1, c2 = st.columns([1, 1])
+        refresh = c1.button("Refresh DB list", key="btn_refresh_dbs")
+        disconnect = c2.button("Disconnect", key="btn_disconnect")
+
+        if disconnect:
+            try:
+                if ss.get("conn") is not None:
+                    ss["conn"].close()
+            except Exception:
+                pass
+            ss["conn"] = None
+            st.info("Disconnected.")
+
+        if refresh:
+            try:
+                cm = _connect_master(ss["server"])
+                ss["db_list"] = _list_databases(cm)
+                try:
+                    cm.close()
+                except Exception:
+                    pass
+
+                if ss["db_list"] and (ss.get("database") not in ss["db_list"]):
+                    ss["database"] = ss["db_list"][0]
+                st.success(f"Loaded {len(ss['db_list'])} DB(s).")
+            except Exception as e:
+                ss["db_list"] = []
+                st.error(f"Refresh failed: {e}")
+
+        dbs = ss.get("db_list") or (["(click Refresh DB list)"] if not ss.get("database") else [ss["database"]])
+        st.selectbox("Database", options=dbs, key="database")
+
+        connect_btn = st.button("Connect", type="primary", key="btn_connect")
+        if connect_btn:
+            try:
+                if not ss.get("database") or ss["database"].startswith("("):
+                    raise ValueError("Select a real database (click Refresh DB list).")
+                ss["conn"] = _connect_db(ss["server"], ss["database"])
+                st.success(f"Connected to {ss['database']}.")
+            except Exception as e:
+                ss["conn"] = None
+                st.error(f"Connect failed: {e}")
+
+        st.caption("Status: connected" if ss.get("conn") is not None else "Status: not connected")
+
+    return ss.get("conn")
+
+
+# ============================================================
+# Shared helpers
+# ============================================================
+def _safe_df(df: pd.DataFrame | None) -> pd.DataFrame:
+    return df if (df is not None and not df.empty) else pd.DataFrame()
+
+
+def _rowterm_to_sql(rt: str) -> str:
+    rt = (rt or "LF").upper().strip()
+    return r"\n" if rt == "LF" else r"\r\n"
+
+
+def _fetch_child_columns(conn, schema: str, table: str) -> pd.DataFrame:
+    sql = """
+    SELECT c.name AS column_name
+    FROM sys.columns c
+    JOIN sys.tables t ON t.object_id = c.object_id
+    JOIN sys.schemas s ON s.schema_id = t.schema_id
+    WHERE s.name = ? AND t.name = ?
+    ORDER BY c.column_id;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    return df if df is not None else pd.DataFrame(columns=["column_name"])
+
+
+def _fetch_cols_meta_types(conn, schema: str, table: str) -> pd.DataFrame:
+    sql = """
+    SELECT
+        c.name AS column_name,
+        CASE
+            WHEN ty.name IN ('nvarchar','varchar','nchar','char') AND c.max_length = -1 THEN ty.name + '(max)'
+            WHEN ty.name IN ('nvarchar','nchar') THEN ty.name + '(' + CAST(c.max_length/2 AS varchar(10)) + ')'
+            WHEN ty.name IN ('varchar','char')  THEN ty.name + '(' + CAST(c.max_length AS varchar(10)) + ')'
+            WHEN ty.name IN ('decimal','numeric') THEN ty.name + '(' + CAST(c.precision AS varchar(10)) + ',' + CAST(c.scale AS varchar(10)) + ')'
+            ELSE ty.name
+        END AS data_type
+    FROM sys.columns c
+    JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+    JOIN sys.tables tb ON tb.object_id = c.object_id
+    JOIN sys.schemas s ON s.schema_id = tb.schema_id
+    WHERE s.name = ? AND tb.name = ?
+    ORDER BY c.column_id;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    return df if df is not None else pd.DataFrame(columns=["column_name", "data_type"])
+
+
+# ============================================================
+# Acquire connection
+# ============================================================
+conn = st.session_state.get("conn") or _sidebar_connect()
+if conn is None:
+    st.warning("Connect to SQL Server in the sidebar to continue.")
+    st.stop()
+
+
+# ============================================================
+# UI
+# ============================================================
+st.title("Load Entity Data (Standalone)")
+
+with st.expander("🔎 Debug: connection sanity", expanded=False):
+    who = db.read_sql(conn, "SELECT @@SERVERNAME AS server_name, DB_NAME() AS database_name;")
+    st.dataframe(_safe_df(who), hide_index=True, use_container_width=True)
+
+
+# ============================================================
+# STEP 1 — Upload / Preview / Save
+# ============================================================
+st.header("Step 1 — Upload / Preview / Save to C:\\Bulk")
+
+uploaded = st.file_uploader("Drop CSV/TXT here", type=["csv", "txt"], key="entity_upload")
+
+c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+with c1:
+    delim_ui = st.selectbox("Delimiter", list(DELIM_MAP.keys()), index=0, key="entity_delim_ui")
+with c2:
+    has_header = st.checkbox("Has header", value=True, key="entity_has_header")
+with c3:
+    rowterm_ui = st.selectbox("RowTerm", ["LF", "CRLF"], index=0, key="entity_rowterm_ui")
+with c4:
+    preview_n = st.number_input("Preview rows", 5, 200, 25, 5, key="entity_preview_n")
+
+delimiter = DELIM_MAP[delim_ui]
+rowterm_sql = _rowterm_to_sql(rowterm_ui)
+
+if uploaded is not None:
+    try:
+        df_preview = pd.read_csv(
+            uploaded,
+            sep=delimiter,
+            nrows=int(preview_n),
+            dtype=str,
+            keep_default_na=False,
+            engine="python",
+            header=0 if has_header else None,
+        )
+        if not has_header:
+            df_preview.columns = [f"COL_{i+1}" for i in range(len(df_preview.columns))]
+        st.dataframe(df_preview, hide_index=True, use_container_width=True)
+        st.caption(f"Delimiter={repr(delimiter)} RowTerm={rowterm_sql} Cols={len(df_preview.columns)}")
+    except Exception as e:
+        st.error(f"Preview failed: {e}")
+        st.stop()
+
+    if st.button("Save upload to C:\\Bulk", type="secondary", key="entity_save_btn"):
+        fp = save_upload(uploaded, BULK_DIR)
+        st.session_state["entity_saved_fp"] = str(fp)
+        st.success("Saved upload.")
+        st.code(str(fp))
+
+
+# ============================================================
+# STEP 2 — Stage
+# ============================================================
+st.header("Step 2 — Stage (BULK INSERT → stg.raw_data)")
+
+saved_fp = st.session_state.get("entity_saved_fp")
+if not saved_fp:
+    st.info("Upload + Save to enable staging.")
+    st.stop()
+
+st.code(f"File to stage:\n{saved_fp}")
+
+if st.button("Stage", type="primary", key="entity_stage_btn"):
+    try:
+        cols = stage_bulk_insert(
+            conn,
+            file_path=saved_fp,
+            delimiter=delimiter,
+            has_header=has_header,
+            rowterm_sql=rowterm_sql,
+        )
+        st.session_state["entity_source_cols"] = cols
+        st.success(f"Staged. Columns detected: {len(cols)}")
+
+        cnt = db.read_sql(conn, "SELECT COUNT(*) AS n FROM stg.raw_data;")
+        st.dataframe(_safe_df(cnt), hide_index=True, use_container_width=True)
+
+        prev = db.read_sql(conn, "SELECT TOP (25) * FROM stg.v_raw_with_rid ORDER BY RID;")
+        st.subheader("stg.v_raw_with_rid (top 25)")
+        st.dataframe(_safe_df(prev), hide_index=True, use_container_width=True)
+    except Exception as e:
+        st.error(f"Stage failed: {e}")
+        st.stop()
+
+source_cols = st.session_state.get("entity_source_cols") or []
+if not source_cols:
+    st.stop()
+
+
+# ============================================================
+# STEP 3 — Choose Primary Table (child)
+# ============================================================
+st.header("Step 3 — Choose Primary Table (child)")
+
+primary_fqn = st.text_input(
+    "Primary table (schema.table)",
+    value=st.session_state.get("primary_table_fqn", "dbo.well"),
+    key="primary_fqn",
+)
+st.session_state["primary_table_fqn"] = primary_fqn
+
+if "." not in primary_fqn:
+    st.error("Enter primary table like dbo.well_status")
+    st.stop()
+
+child_schema, child_table = primary_fqn.split(".", 1)
+child_cols_df = _fetch_child_columns(conn, child_schema, child_table)
+
+if child_cols_df.empty:
+    st.error(f"Could not read columns for {child_schema}.{child_table}")
+    st.stop()
+
+child_columns = child_cols_df["column_name"].astype(str).tolist()
+st.caption("Next: map staged columns → primary table columns and build the NORM view.")
+
+# ============================================================
+# STEP 4 — Mapping grid (primary)  [REFRESH-SAFE + FK META]
+# ============================================================
+st.header("Step 4 — Map staged columns → primary table columns")
+
+def _fetch_fk_targets_by_child_col(conn, schema: str, table: str) -> dict[str, dict]:
+    """
+    Returns: child_col -> {"fk_name":..., "parent_schema":..., "parent_table":...}
+    If multiple FKs reference the same child col, we keep the first by ordinal (common in PPDM: usually 1).
+    """
+    sql = r"""
+    SELECT
+        fk.name AS fk_name,
+        sch_child.name AS child_schema,
+        tab_child.name AS child_table,
+        col_child.name AS child_column,
+        sch_parent.name AS parent_schema,
+        tab_parent.name AS parent_table,
+        fkc.constraint_column_id AS ordinal
+    FROM sys.foreign_keys fk
+    JOIN sys.foreign_key_columns fkc
+        ON fkc.constraint_object_id = fk.object_id
+    JOIN sys.tables tab_child
+        ON tab_child.object_id = fk.parent_object_id
+    JOIN sys.schemas sch_child
+        ON sch_child.schema_id = tab_child.schema_id
+    JOIN sys.columns col_child
+        ON col_child.object_id = tab_child.object_id
+       AND col_child.column_id = fkc.parent_column_id
+    JOIN sys.tables tab_parent
+        ON tab_parent.object_id = fk.referenced_object_id
+    JOIN sys.schemas sch_parent
+        ON sch_parent.schema_id = tab_parent.schema_id
+    WHERE sch_child.name = ?
+      AND tab_child.name = ?
+    ORDER BY col_child.name, fkc.constraint_column_id;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    out: dict[str, dict] = {}
+    if df is None or df.empty:
+        return out
+
+    for _, r in df.iterrows():
+        cc = str(r["child_column"])
+        if cc not in out:
+            out[cc] = {
+                "fk_name": str(r["fk_name"]),
+                "parent_schema": str(r["parent_schema"]),
+                "parent_table": str(r["parent_table"]),
+            }
+    return out
+
+
+def _fetch_check_constraints_by_child_col(conn, schema: str, table: str) -> dict[str, list[str]]:
+    """
+    Column-level CHECK constraints only (parent_column_id != 0).
+    Returns: child_col -> [constraint_name, ...]
+    """
+    sql = r"""
+    SELECT
+        c.name AS column_name,
+        cc.name AS check_name
+    FROM sys.check_constraints cc
+    JOIN sys.tables t
+        ON t.object_id = cc.parent_object_id
+    JOIN sys.schemas s
+        ON s.schema_id = t.schema_id
+    JOIN sys.columns c
+        ON c.object_id = t.object_id
+       AND c.column_id = cc.parent_column_id
+    WHERE s.name = ?
+      AND t.name = ?
+    ORDER BY c.column_id, cc.name;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    out: dict[str, list[str]] = {}
+    if df is None or df.empty:
+        return out
+    for _, r in df.iterrows():
+        col = str(r["column_name"])
+        out.setdefault(col, []).append(str(r["check_name"]))
+    return out
+
+
+# base default mapping (name match)
+src_u = {c.upper(): c for c in source_cols}
+default_rows = []
+for tgt in child_columns:
+    guess = src_u.get(str(tgt).upper(), "")
+    default_rows.append(
+        {
+            "treat_as_fk": False,  # LEFT EDGE
+            "column_name": str(tgt),
+            "source_column": guess,
+            "constant_value": "",
+            "transform": "trim",
+        }
+    )
+map_df_base = pd.DataFrame(default_rows)
+
+# restore persisted edits if present
+if "primary_map_df" in st.session_state and isinstance(st.session_state["primary_map_df"], pd.DataFrame):
+    base = st.session_state["primary_map_df"]
+    if not base.empty and "column_name" in base.columns:
+        # keep user edits, but ensure required columns exist
+        map_df_base = base.copy()
+        for col in ["treat_as_fk", "source_column", "constant_value", "transform"]:
+            if col not in map_df_base.columns:
+                map_df_base[col] = "" if col != "treat_as_fk" else False
+
+# ---- FK + CHECK metadata (read-only helper columns) ----
+fk_meta = _fetch_fk_targets_by_child_col(conn, child_schema, child_table)
+chk_meta = _fetch_check_constraints_by_child_col(conn, child_schema, child_table)
+
+def _fk_label_for(col: str) -> tuple[str, str]:
+    """
+    Returns (fk_target, fk_class)
+      fk_class: "FK → r_ table" | "FK → info table" | ""
+    """
+    m = fk_meta.get(col)
+    if not m:
+        return ("", "")
+    parent = f"{m['parent_schema']}.{m['parent_table']}"
+    pt = str(m["parent_table"] or "")
+    if pt.lower().startswith("r_"):
+        return (parent, "FK → r_ table")
+    return (parent, "FK → info table")
+
+map_df_base["fk_target"] = map_df_base["column_name"].map(lambda c: _fk_label_for(str(c))[0])
+map_df_base["fk_class"]  = map_df_base["column_name"].map(lambda c: _fk_label_for(str(c))[1])
+map_df_base["has_check"] = map_df_base["column_name"].map(lambda c: str(c) in chk_meta)
+map_df_base["check_names"] = map_df_base["column_name"].map(lambda c: ", ".join(chk_meta.get(str(c), [])))
+
+# Ensure column order with Treat-as-FK on left edge
+ordered_cols = [
+    "treat_as_fk",
+    "column_name",
+    "source_column",
+    "constant_value",
+    "transform",
+    "fk_class",
+    "fk_target",
+    "has_check",
+    "check_names",
+]
+for c in ordered_cols:
+    if c not in map_df_base.columns:
+        map_df_base[c] = "" if c != "treat_as_fk" else False
+map_df_base = map_df_base[ordered_cols]
+
+st.caption("Edits are batched: the grid will NOT refresh until you click **Apply edits** (form submit).")
+
+# ---- FORM: prevents rerun on every edit ----
+show_only_fk = st.checkbox(
+    "Show only FK-related rows",
+    value=False,
+    help="Filters the grid to only rows that either have an FK relationship or are ticked Treat-as-FK.",
+    key="primary_map_show_only_fk",
+)
+
+grid_df = map_df_base.copy()
+if show_only_fk:
+    grid_df = grid_df[(grid_df["fk_target"].astype(str).str.len() > 0) | (grid_df["treat_as_fk"] == True)]
+
+with st.form("primary_map_form", clear_on_submit=False):
+    edited_df = st.data_editor(
+        grid_df,
+        width="stretch",
+        num_rows="fixed",
+        column_config={
+            "treat_as_fk": st.column_config.CheckboxColumn("Treat as FK", help="Include in FK QC / optional seeding"),
+            "column_name": st.column_config.TextColumn("Target column (primary)", required=True, disabled=True),
+            "source_column": st.column_config.SelectboxColumn("Staged source column", options=[""] + source_cols),
+            "constant_value": st.column_config.TextColumn("Constant (optional)"),
+            "transform": st.column_config.SelectboxColumn("Transform", options=["none", "trim", "upper"]),
+            "fk_class": st.column_config.TextColumn("FK type", disabled=True),
+            "fk_target": st.column_config.TextColumn("FK target", disabled=True),
+            "has_check": st.column_config.CheckboxColumn("CHECK?", disabled=True),
+            "check_names": st.column_config.TextColumn("CHECK name(s)", disabled=True),
+        },
+        key="primary_map_grid",
+    )
+
+    b1, b2, b3 = st.columns([1, 1, 1])
+
+    apply_edits = b1.form_submit_button("Apply edits", type="primary")
+    clear_fks   = b2.form_submit_button("Clear FK ticks")
+    auto_tick   = b3.form_submit_button("Auto-tick FKs")
+
+# ---- Handle form actions (single rerun point) ----
+if apply_edits or clear_fks or auto_tick:
+    df2 = map_df_base.copy()
+    updates = edited_df.set_index("column_name")
+    df2 = df2.set_index("column_name")
+    for col in ["treat_as_fk", "source_column", "constant_value", "transform"]:
+        if col in updates.columns:
+            df2.loc[df2.index.intersection(updates.index), col] = updates.loc[df2.index.intersection(updates.index), col]
+    df2 = df2.reset_index()
+
+    if clear_fks:
+        df2["treat_as_fk"] = False
+
+    if auto_tick:
+        try:
+            fk_cols = suggest_fk_candidates_step4(conn, child_schema=child_schema, child_table=child_table)
+            fk_set = {c.upper() for c in (fk_cols or [])}
+            df2["treat_as_fk"] = df2["column_name"].astype(str).str.upper().isin(fk_set)
+        except Exception as e:
+            st.error(f"FK auto-suggest failed: {e}")
+
+    # Persist ONLY the editable + required columns (+ keep helper cols too if you want)
+    st.session_state["primary_map_df"] = df2.copy()
+    st.success("Mapping saved.")
+    st.rerun()
+
+
+
+
+# ============================================================
+# STEP 5 — Build NORM view
+# ============================================================
+st.header("Step 5 — Build NORM view")
+
+if st.button("Build NORM view", type="primary", key="build_norm_btn"):
+    try:
+        m2 = st.session_state["primary_map_df"].copy()
+
+        for c in ("source_column", "constant_value", "column_name", "treat_as_fk"):
+            if c not in m2.columns:
+                m2[c] = ""
+
+        m2["source_column"] = m2["source_column"].fillna("").astype(str).str.strip()
+        m2["constant_value"] = m2["constant_value"].fillna("").astype(str).str.strip()
+        m2["column_name"] = m2["column_name"].fillna("").astype(str).str.strip()
+
+        cols_meta = _fetch_cols_meta_types(conn, child_schema, child_table)
+        treat_fk_cols = m2.loc[m2["treat_as_fk"] == True, "column_name"].astype(str).tolist()
+
+        view_sql, view_name, _ = build_primary_norm_view_sql(
+            primary_schema=child_schema,
+            primary_table=child_table,
+            cols_df=cols_meta,
+            mapping_df=m2[["column_name", "source_column", "constant_value"]],
+            treat_as_fk_cols=treat_fk_cols,
+        )
+
+        db.exec_view_ddl(conn, view_sql)
+        st.session_state["norm_view_name"] = view_name
+
+        st.success(f"Built NORM view: {view_name}")
+        prev = db.read_sql(conn, f"SELECT TOP (25) * FROM {view_name} ORDER BY RID;")
+        st.subheader("NORM view preview (top 25)")
+        st.dataframe(_safe_df(prev), hide_index=True, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Build NORM view failed: {e}")
+
+norm_view = st.session_state.get("norm_view_name")
+if not norm_view:
+    st.info("Build the NORM view above to enable Step 6.")
+    st.stop()
+
+
+# ============================================================
+# STEP 6 — FK QC (missing reference values) + optional seeding
+# Default: pass-through (QC only)
+# ============================================================
+st.header("Step 6 — FK QC (missing reference values) + optional seeding")
+
+def _qident(name: str) -> str:
+    return "[" + (name or "").replace("]", "]]") + "]"
+
+def _qfqn(schema: str, table: str) -> str:
+    return f"{_qident(schema)}.{_qident(table)}"
+
+def _fetch_parent_meta(conn, schema: str, table: str) -> pd.DataFrame:
+    sql = """
+    SELECT
+        c.name AS column_name,
+        c.is_nullable,
+        c.is_identity,
+        dc.definition AS default_definition
+    FROM sys.columns c
+    JOIN sys.tables  t ON t.object_id = c.object_id
+    JOIN sys.schemas s ON s.schema_id = t.schema_id
+    LEFT JOIN sys.default_constraints dc
+        ON dc.parent_object_id = c.object_id
+       AND dc.parent_column_id = c.column_id
+    WHERE s.name = ? AND t.name = ?
+    ORDER BY c.column_id;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    return df if df is not None else pd.DataFrame()
+
+def _can_seed_with_keys_only(conn, parent_schema: str, parent_table: str, parent_key_cols: list[str]) -> tuple[bool, list[str], str]:
+    meta = _fetch_parent_meta(conn, parent_schema, parent_table)
+    if meta.empty:
+        return (False, [], "Could not read parent column metadata.")
+
+    key_u = {c.upper() for c in parent_key_cols}
+    required_extras: list[str] = []
+
+    for _, r in meta.iterrows():
+        col = str(r["column_name"])
+        col_u = col.upper()
+        is_nullable = int(r["is_nullable"])
+        is_identity = int(r["is_identity"])
+        has_default = (r.get("default_definition") is not None) and str(r.get("default_definition")).strip() != ""
+
+        if is_identity == 1:
+            continue
+        if col_u in key_u:
+            continue
+        if has_default:
+            continue
+        if col_u in ("ACTIVE_IND", "PPDM_GUID"):
+            continue
+
+        if is_nullable == 0:
+            required_extras.append(col)
+
+    if required_extras:
+        return (False, required_extras, "Parent has NOT NULL columns beyond the FK keys without defaults.")
+
+    return (True, [], "Parent appears insertable using FK keys only (+ defaults).")
+
+def _sql_missing_parent_keys(*, norm_view_fqn: str, fkinfo, top_n: int = 2000) -> tuple[str, str]:
+    parent_fqn = _qfqn(fkinfo.parent_schema, fkinfo.parent_table)
+
+    proj_exprs = []
+    req_preds = []
+    join_preds = []
+    order_cols = []
+
+    for child_col, parent_col in fkinfo.pairs:
+        expr = f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), v.{_qident(child_col + '__NAT')}))), N'')"
+        proj_exprs.append(f"{expr} AS {_qident(parent_col)}")
+        req_preds.append(f"{_qident(parent_col)} IS NOT NULL")
+        order_cols.append(_qident(parent_col))
+
+        join_preds.append(
+            f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{_qident(parent_col)}))), N'')"
+            f" = s.{_qident(parent_col)}"
+        )
+
+    proj_sql = ",\n        ".join(proj_exprs) if proj_exprs else "NULL AS [__none__]"
+    req_sql = " AND ".join(req_preds) if req_preds else "1=1"
+    join_sql = " AND ".join(join_preds) if join_preds else "1=1"
+    order_sql = ", ".join(order_cols) if order_cols else "(SELECT 1)"
+
+    sql_sample = f"""
+;WITH src AS (
+    SELECT DISTINCT
+        {proj_sql}
+    FROM {norm_view_fqn} v
+),
+missing AS (
+    SELECT s.*
+    FROM src s
+    WHERE {req_sql}
+      AND NOT EXISTS (
+          SELECT 1
+          FROM {parent_fqn} t
+          WHERE {join_sql}
+      )
+)
+SELECT TOP ({int(top_n)}) *
+FROM missing
+ORDER BY {order_sql};
+""".strip()
+
+    sql_count = f"""
+;WITH src AS (
+    SELECT DISTINCT
+        {proj_sql}
+    FROM {norm_view_fqn} v
+),
+missing AS (
+    SELECT s.*
+    FROM src s
+    WHERE {req_sql}
+      AND NOT EXISTS (
+          SELECT 1
+          FROM {parent_fqn} t
+          WHERE {join_sql}
+      )
+)
+SELECT COUNT(*) AS missing_total
+FROM missing;
+""".strip()
+
+    return sql_sample, sql_count
+
+def _sql_seed_parent_keys_only(*, norm_view_fqn: str, fkinfo) -> str:
+    parent_fqn = _qfqn(fkinfo.parent_schema, fkinfo.parent_table)
+
+    insert_cols = []
+    select_cols = []
+    req_preds = []
+    join_preds = []
+
+    for child_col, parent_col in fkinfo.pairs:
+        insert_cols.append(_qident(parent_col))
+        expr = f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), v.{_qident(child_col + '__NAT')}))), N'')"
+        select_cols.append(f"{expr} AS {_qident(parent_col)}")
+        req_preds.append(f"{_qident(parent_col)} IS NOT NULL")
+
+        join_preds.append(
+            f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{_qident(parent_col)}))), N'')"
+            f" = s.{_qident(parent_col)}"
+        )
+
+    insert_cols_sql = ", ".join(insert_cols) if insert_cols else ""
+    select_cols_sql = ",\n        ".join(select_cols) if select_cols else ""
+    req_sql = " AND ".join(req_preds) if req_preds else "1=1"
+    join_sql = " AND ".join(join_preds) if join_preds else "1=1"
+
+    return f"""
+;WITH src AS (
+    SELECT DISTINCT
+        {select_cols_sql}
+    FROM {norm_view_fqn} v
+),
+missing AS (
+    SELECT s.*
+    FROM src s
+    WHERE {req_sql}
+      AND NOT EXISTS (
+          SELECT 1
+          FROM {parent_fqn} t
+          WHERE {join_sql}
+      )
+)
+INSERT INTO {parent_fqn} ({insert_cols_sql})
+SELECT {", ".join([f"s.{c}" for c in insert_cols])}
+FROM missing s;
+""".strip()
+
+
+primary_map_df = st.session_state.get("primary_map_df")
+treat_fk_cols = (
+    primary_map_df.loc[primary_map_df.get("treat_as_fk") == True, "column_name"]
+    .astype(str)
+    .tolist()
+)
+treat_fk_cols = [c for c in treat_fk_cols if c.strip()]
+
+cA, cB, cC = st.columns([2, 2, 2])
+with cA:
+    pass_through = st.checkbox("Pass-through (QC only, no seeding)", value=True, key="step6_pass_through")
+with cB:
+    allow_seeding = st.checkbox("Allow seeding (inserts into parent tables)", value=False, key="step6_allow_seeding")
+with cC:
+    top_n = st.number_input("Show top N missing", 10, 50000, 2000, 100, key="step6_topn")
+
+if not treat_fk_cols:
+    st.info("No FK columns marked. Tick 'Treat as FK' in Step 4 if you want FK QC.")
+else:
+    for child_fk_col in treat_fk_cols:
+        fkinfo = introspect_fk_by_child_col(
+            conn,
+            child_schema=child_schema,
+            child_table=child_table,
+            child_col=child_fk_col,
+        )
+
+        if fkinfo is None:
+            with st.expander(f"⚠️ {child_fk_col} — No FK found in metadata", expanded=False):
+                st.warning("Marked Treat-as-FK, but SQL Server FK metadata did not find a relationship.")
+            continue
+
+        parent_label = f"{fkinfo.parent_schema}.{fkinfo.parent_table}"
+        title = f"FK: {child_fk_col} → {parent_label}  ({fkinfo.fk_name})"
+
+        with st.expander(title, expanded=False):
+            st.dataframe(pd.DataFrame(fkinfo.pairs, columns=["child_col", "parent_col"]), hide_index=True, use_container_width=True)
+
+            sql_sample, sql_count = _sql_missing_parent_keys(norm_view_fqn=norm_view, fkinfo=fkinfo, top_n=int(top_n))
+
+            c1, c2 = st.columns([1, 1])
+            if c1.button("Compute missing", key=f"step6_missing_{child_fk_col}", type="primary"):
+                miss_df = db.read_sql(conn, sql_sample)
+                cnt_df = db.read_sql(conn, sql_count)
+                missing_total = int(cnt_df.iloc[0]["missing_total"]) if (cnt_df is not None and not cnt_df.empty) else 0
+
+                st.session_state[f"step6_miss_df_{child_fk_col}"] = _safe_df(miss_df)
+                st.session_state[f"step6_miss_total_{child_fk_col}"] = missing_total
+                st.session_state[f"step6_sql_sample_{child_fk_col}"] = sql_sample
+                st.session_state[f"step6_sql_count_{child_fk_col}"] = sql_count
+
+            seed_enabled = (allow_seeding and (not pass_through))
+
+            parent_key_cols = [p for _, p in fkinfo.pairs]
+            can_seed, required_extras, reason = _can_seed_with_keys_only(
+                conn, fkinfo.parent_schema, fkinfo.parent_table, parent_key_cols
+            )
+
+            # UOM warning
+            parent_name_u = fkinfo.parent_table.lower()
+            if "unit_of_measure" in parent_name_u or parent_name_u.startswith("ppdm_unit"):
+                st.warning(
+                    "Best practice: do NOT auto-seed Units of Measure from file data. "
+                    "QC missing codes instead (seed UOMs from a canonical list)."
+                )
+
+            if not seed_enabled:
+                st.button("Seed missing (disabled)", disabled=True, key=f"step6_seed_disabled_{child_fk_col}")
+            else:
+                if not can_seed:
+                    st.error(f"Seeding blocked: {reason}")
+                    if required_extras:
+                        st.write("Required extra columns:", required_extras)
+                    st.button("Seed missing (blocked)", disabled=True, key=f"step6_seed_blocked_{child_fk_col}")
+                else:
+                    if st.button("Seed missing (keys only)", key=f"step6_seed_{child_fk_col}"):
+                        seed_sql = _sql_seed_parent_keys_only(norm_view_fqn=norm_view, fkinfo=fkinfo)
+                        cur = conn.cursor()
+                        cur.execute(seed_sql)
+                        conn.commit()
+                        st.session_state[f"step6_seed_sql_{child_fk_col}"] = seed_sql
+                        st.success("Seed executed. Recompute missing to verify.")
+
+            miss_df = st.session_state.get(f"step6_miss_df_{child_fk_col}")
+            miss_total = st.session_state.get(f"step6_miss_total_{child_fk_col}")
+            if miss_df is not None:
+                st.subheader("Missing reference values (sample)")
+                st.dataframe(_safe_df(miss_df), hide_index=True, use_container_width=True)
+                st.caption(f"Missing shown: {len(miss_df)} | Missing total: {miss_total}")
+
+            with st.expander("SQL — missing sample", expanded=False):
+                st.code(sql_sample, language="sql")
+            with st.expander("SQL — missing count", expanded=False):
+                st.code(sql_count, language="sql")
+
+            sql_seed = st.session_state.get(f"step6_seed_sql_{child_fk_col}")
+            if sql_seed:
+                with st.expander("SQL — seed insert", expanded=False):
+                    st.code(sql_seed, language="sql")
+
+
+# ============================================================
+# STEP 7 — Promote (insert new only) [ONCE]
+# ============================================================
+st.header("Step 7 — Promote to dbo.well (insert new only)")
+
+# Keep your original promote target. If you want this to follow Step 3 table selection,
+# change target_fqn = primary_fqn (and adjust key logic).
+target_fqn = "dbo.well"
+
+view_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {norm_view};").columns.tolist()
+well_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {target_fqn};").columns.tolist()
+
+insert_cols = [c for c in view_cols if c in well_cols]
+if "UWI" in insert_cols:
+    insert_cols = ["UWI"] + [c for c in insert_cols if c != "UWI"]
+
+st.caption(f"Columns to insert: {len(insert_cols)}")
+st.code(", ".join(insert_cols))
+
+col_sql = ", ".join(f"[{c}]" for c in insert_cols)
+sel_sql = ", ".join(f"v.[{c}]" for c in insert_cols)
+
+sql_count = f"""
+SET NOCOUNT ON;
+SELECT COUNT(*) AS would_insert
+FROM {norm_view} v
+WHERE v.[UWI] IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM {target_fqn} w WHERE w.[UWI] = v.[UWI]);
+"""
+
+sql_insert = f"""
+SET NOCOUNT ON;
+INSERT INTO {target_fqn} ({col_sql})
+SELECT {sel_sql}
+FROM {norm_view} v
+WHERE v.[UWI] IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM {target_fqn} w WHERE w.[UWI] = v.[UWI]);
+"""
+
+cP1, cP2 = st.columns([1, 1])
+if cP1.button("Preview would-insert count", key="promote_preview"):
+    df = db.read_sql(conn, sql_count)
+    st.dataframe(_safe_df(df), hide_index=True, use_container_width=True)
+
+if cP2.button("Promote now (insert new only)", type="primary", key="promote_insert"):
+    db.exec_sql(conn, sql_insert)
+    st.success("Promote completed.")
+
+with st.expander("SQL — promote preview / insert", expanded=False):
+    st.code(sql_count, language="sql")
+    st.code(sql_insert, language="sql")
