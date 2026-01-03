@@ -13,6 +13,7 @@ from ppdm_loader.fk_introspect import introspect_fk_by_child_col
 from ppdm_loader.fk_suggest import suggest_fk_candidates_step4
 
 from common.ui import sidebar_connect, require_connection
+from ppdm_loader.child_insert import fetch_fk_map, fetch_pk_columns, build_insert_new_sql_generic
 
 
 # ============================================================
@@ -568,7 +569,7 @@ FROM missing;
 
 
 # ============================================================
-# STEP 7 — Promote (insert new only)  (simple, stable)
+# STEP 7 — Promote (insert new only)  (generic + PK-aware + optional FK join)
 # ============================================================
 st.header("Step 7 — Promote to target (insert new only)")
 
@@ -581,6 +582,7 @@ if "." not in target_fqn:
 tgt_schema, tgt_table = target_fqn.split(".", 1)
 target_full = _qfqn(tgt_schema, tgt_table)
 
+# Read columns
 try:
     view_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {norm_view};").columns.tolist()
     tgt_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {target_full};").columns.tolist()
@@ -588,6 +590,7 @@ except Exception as e:
     st.error(f"Could not read columns for promote: {e}")
     st.stop()
 
+# intersection
 insert_cols = [c for c in view_cols if c in tgt_cols]
 st.caption(f"Columns to insert (intersection): {len(insert_cols)}")
 st.code(", ".join(insert_cols))
@@ -596,29 +599,99 @@ if not insert_cols:
     st.warning("No common columns between NORM view and target table.")
     st.stop()
 
-# If table has UWI, use that as existence check; otherwise you can switch to a PK check later.
-key_col = "UWI" if "UWI" in insert_cols else insert_cols[0]
-st.caption(f"Existence check uses key column: {key_col}")
+# ------------------------------------------------------------
+# Key selection: prefer PK columns (composite-safe)
+# ------------------------------------------------------------
+pk_cols = fetch_pk_columns(conn, schema=tgt_schema, table=tgt_table) or []
+if pk_cols:
+    key_cols = [c for c in pk_cols if c in insert_cols]
+else:
+    key_cols = ["UWI"] if "UWI" in insert_cols else [insert_cols[0]]
 
-col_sql = ", ".join(f"[{c}]" for c in insert_cols)
-sel_sql = ", ".join(f"v.[{c}]" for c in insert_cols)
+if not key_cols:
+    # last resort
+    key_cols = [insert_cols[0]]
+
+st.caption(f"Existence check uses key columns: {', '.join(key_cols)}")
+
+# ------------------------------------------------------------
+# Optional FK enforcement (child/station tables)
+#   - If exactly one FK exists, we enforce it by JOINing parent
+#   - If multiple FKs exist, we skip enforcement (still PK-safe)
+# ------------------------------------------------------------
+fk_name = None
+try:
+    fks = fetch_fk_map(conn, child_schema=tgt_schema, child_table=tgt_table)
+    if len(fks) == 1:
+        fk = fks[0]
+        # only enforce if all child FK cols are available in insert_cols
+        child_fk_cols = [cc for (cc, _pc) in fk.pairs]
+        if all(c in insert_cols for c in child_fk_cols):
+            fk_name = fk.fk_name
+except Exception:
+    fk_name = None
+
+if fk_name:
+    st.caption(f"FK enforcement enabled (single FK): {fk_name}")
+else:
+    st.caption("FK enforcement: off (0 or multiple FKs, or missing FK columns in insert set).")
+
+# ------------------------------------------------------------
+# Audit defaults (only used if those columns exist in insert_cols)
+# ------------------------------------------------------------
+# SELECT expressions (support audit defaults)
+loaded_by = "Perry M Stokes"
+who = (loaded_by or "").replace("'", "''")
+
+sel_exprs = []
+for c in insert_cols:
+    u = c.upper()
+
+    if who and u in {"ROW_CREATED_BY", "ROW_CHANGED_BY"}:
+        sel_exprs.append(f"N'{who}' AS {_qident(c)}")
+
+    elif u in {"ROW_CREATED_DATE", "ROW_CHANGED_DATE", "ROW_EFFECTIVE_DATE"}:
+        sel_exprs.append(f"SYSUTCDATETIME() AS {_qident(c)}")
+
+    elif u == "PPDM_GUID":
+        sel_exprs.append(f"CONVERT(nvarchar(36), NEWID()) AS {_qident(c)}")
+
+    else:
+        sel_exprs.append(f"v.{_qident(c)}")
+
+
+col_sql = ", ".join(_qident(c) for c in insert_cols)
+sel_sql = ", ".join(sel_exprs)
+
+key_not_null = " AND ".join(f"v.{_qident(k)} IS NOT NULL" for k in key_cols)
+exists_pred = " AND ".join(f"t.{_qident(k)} = v.{_qident(k)}" for k in key_cols)
+
+join_sql = ""
+if fk_name:
+    fk = next((x for x in fetch_fk_map(conn, child_schema=tgt_schema, child_table=tgt_table) if x.fk_name == fk_name), None)
+    if fk:
+        parent_full = _qfqn(fk.parent_schema, fk.parent_table)
+        preds = [f"p.{_qident(parent_col)} = v.{_qident(child_col)}" for (child_col, parent_col) in fk.pairs]
+        join_sql = f"JOIN {parent_full} p ON " + " AND ".join(preds)
 
 sql_count = f"""
 SET NOCOUNT ON;
 SELECT COUNT(*) AS would_insert
 FROM {norm_view} v
-WHERE v.[{key_col}] IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE t.[{key_col}] = v.[{key_col}]);
-"""
+{join_sql}
+WHERE {key_not_null}
+  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE {exists_pred});
+""".strip()
 
 sql_insert = f"""
 SET NOCOUNT ON;
 INSERT INTO {target_full} ({col_sql})
 SELECT {sel_sql}
 FROM {norm_view} v
-WHERE v.[{key_col}] IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE t.[{key_col}] = v.[{key_col}]);
-"""
+{join_sql}
+WHERE {key_not_null}
+  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE {exists_pred});
+""".strip()
 
 c1, c2 = st.columns([1, 1])
 if c1.button("Preview would-insert count", key="promote_preview"):
@@ -632,3 +705,4 @@ if c2.button("Promote now (insert new only)", type="primary", key="promote_inser
 with st.expander("Promote SQL", expanded=False):
     st.code(sql_count, language="sql")
     st.code(sql_insert, language="sql")
+
