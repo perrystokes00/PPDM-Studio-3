@@ -567,22 +567,125 @@ FROM missing;
                 st.code(sql_sample, language="sql")
                 st.code(sql_count, language="sql")
 
-
 # ============================================================
-# STEP 7 — Promote (insert new only)  (generic + PK-aware + optional FK join)
+# STEP 7 — Promote (insert new only)  (PK-aware + derived keys + audit defaults)
 # ============================================================
 st.header("Step 7 — Promote to target (insert new only)")
 
+# ------------------------------------------------------------------
+# Derived PK registry (interval / pick style tables)
+# Key: lowercase "schema.table"
+#
+# Each derived key:
+#   len: output length (PPDM often uses 20-char SHA1 slices)
+#   inputs: columns from the NORM view used to create a stable hash
+#
+# NOTE:
+# - inputs must exist as columns in the NORM view (case-insensitive match in Step 7)
+# - choose a set of inputs that are stable in your source data
+# ------------------------------------------------------------------
+DERIVED_PK_REGISTRY = {
+    # --------------------------------------------------------------
+    # ZONE INTERVALS (Kansas intervals -> dbo.well_zone_interval)
+    # PK includes INTERVAL_ID, so we derive it.
+    # --------------------------------------------------------------
+    "dbo.well_zone_interval": {
+        "derived": {
+            # Option A (recommended): MD-based interval identity
+            # Uses TOP_MD/BASE_MD which you have in stg_v_norm_dbo_well_zone_interval
+            "INTERVAL_ID": {
+                "len": 20,
+                "inputs": ["UWI", "SOURCE", "ZONE_ID", "ZONE_SOURCE", "TOP_MD", "BASE_MD"],
+            },
+
+            # Option B (alternative): TVD-based interval identity (more stable if MD varies)
+            # Uncomment this and comment Option A if you prefer TVD
+            # "INTERVAL_ID": {
+            #     "len": 20,
+            #     "inputs": ["UWI", "SOURCE", "ZONE_ID", "ZONE_SOURCE", "TOP_TVD", "BASE_TVD"],
+            # },
+
+            # Option C (max uniqueness): include both MD + TVD
+            # Uncomment if you want to avoid collisions across similar intervals
+            # "INTERVAL_ID": {
+            #     "len": 20,
+            #     "inputs": ["UWI", "SOURCE", "ZONE_ID", "ZONE_SOURCE", "TOP_MD", "BASE_MD", "TOP_TVD", "BASE_TVD"],
+            # },
+        }
+    },
+
+    # --------------------------------------------------------------
+    # GENERIC ZONE_INTERVAL (if you load a non-well-specific interval table)
+    # Common pattern: INTERVAL_ID derived from zone + depths.
+    # --------------------------------------------------------------
+    "dbo.zone_interval": {
+        "derived": {
+            "INTERVAL_ID": {
+                "len": 20,
+                "inputs": ["ZONE_ID", "SOURCE", "TOP_MD", "BASE_MD"],
+            }
+        }
+    },
+
+    # --------------------------------------------------------------
+    # STRAT / TOPS (PICKS)
+    # Many PPDM tables use INTERP_ID (interpretation/pick id) in PK.
+    # If you load dbo.strat_well_section for tops/picks, this is useful.
+    # Adjust PICK_* column names to what your NORM view produces.
+    # --------------------------------------------------------------
+    "dbo.strat_well_section": {
+        "derived": {
+            "INTERP_ID": {
+                "len": 20,
+                "inputs": ["UWI", "STRAT_NAME_SET_ID", "STRAT_UNIT_ID", "SOURCE", "PICK_DEPTH"],
+            }
+        }
+    },
+
+    # --------------------------------------------------------------
+    # WELL STRAT UNIT (if you use an interval-style well->strat link table)
+    # Some variants use STRAT_UNIT_SHA1 or an INTERP/INTERVAL key.
+    # This is an example: adjust to your real PK columns if needed.
+    # --------------------------------------------------------------
+    "dbo.well_node_strat_unit": {
+        "derived": {
+            # Only use if your target PK includes STRAT_UNIT_SHA1 (some implementations do)
+            "STRAT_UNIT_SHA1": {
+                "len": 20,
+                "inputs": ["NODE_ID", "STRAT_NAME_SET_ID", "STRAT_UNIT_ID", "SOURCE"],
+            }
+        }
+    },
+
+    # --------------------------------------------------------------
+    # DIRECTIONAL SURVEY STATIONS (you already have this pattern)
+    # Derive DEPTH_OBS_NO when target requires it (NOT NULL / PK component).
+    # --------------------------------------------------------------
+    "dbo.well_dir_srvy_station": {
+        "derived": {
+            "DEPTH_OBS_NO": {
+                "len": 20,
+                "inputs": ["UWI", "SURVEY_ID", "SOURCE", "STATION_ID", "STATION_MD"],
+            }
+        }
+    },
+}
+
+# -----------------------------
+# Target selection
+# -----------------------------
 target_fqn = st.text_input("Target table (schema.table)", value=primary_fqn, key="promote_target_fqn")
 
 if "." not in target_fqn:
-    st.error("Enter target table like dbo.well_dir_srvy")
+    st.error("Enter target table like dbo.well_dir_srvy_station")
     st.stop()
 
 tgt_schema, tgt_table = target_fqn.split(".", 1)
 target_full = _qfqn(tgt_schema, tgt_table)
 
+# -----------------------------
 # Read columns
+# -----------------------------
 try:
     view_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {norm_view};").columns.tolist()
     tgt_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {target_full};").columns.tolist()
@@ -590,97 +693,188 @@ except Exception as e:
     st.error(f"Could not read columns for promote: {e}")
     st.stop()
 
-# intersection
-insert_cols = [c for c in view_cols if c in tgt_cols]
-st.caption(f"Columns to insert (intersection): {len(insert_cols)}")
-st.code(", ".join(insert_cols))
+view_cols_u = {c.upper(): c for c in view_cols}
+tgt_cols_u = {c.upper(): c for c in tgt_cols}
 
-if not insert_cols:
-    st.warning("No common columns between NORM view and target table.")
+# intersection (what we can insert directly from v.*)
+insert_cols = [c for c in view_cols if c.upper() in tgt_cols_u]
+st.caption(f"Columns insertable from view (intersection): {len(insert_cols)}")
+st.code(", ".join(insert_cols) if insert_cols else "(none)")
+
+# -----------------------------
+# PK columns (composite-safe)
+# -----------------------------
+pk_cols = fetch_pk_columns(conn, schema=tgt_schema, table=tgt_table) or []
+if not pk_cols:
+    st.error("Could not detect PK columns for target. Step 7 requires a PK for safe insert-only.")
     st.stop()
 
-# ------------------------------------------------------------
-# Key selection: prefer PK columns (composite-safe)
-# ------------------------------------------------------------
-pk_cols = fetch_pk_columns(conn, schema=tgt_schema, table=tgt_table) or []
-if pk_cols:
-    key_cols = [c for c in pk_cols if c in insert_cols]
+st.caption(f"Target PK: {', '.join(pk_cols)}")
+
+# -----------------------------
+# Audit + GUID defaults
+# Only applied if those columns exist on target.
+# -----------------------------
+LOADED_BY = "Perry M Stokes"
+who = (LOADED_BY or "").replace("'", "''")
+
+AUDIT_DEFAULTS = {
+    "ROW_CREATED_BY": lambda: f"N'{who}'",
+    "ROW_CHANGED_BY": lambda: f"N'{who}'",
+    "ROW_CREATED_DATE": lambda: "SYSUTCDATETIME()",
+    "ROW_CHANGED_DATE": lambda: "SYSUTCDATETIME()",
+    "ROW_EFFECTIVE_DATE": lambda: "SYSUTCDATETIME()",
+}
+
+# -----------------------------
+# Derived key support
+# -----------------------------
+def _sql_trim(alias: str, col: str) -> str:
+    # coalesce+trim+cast to nvarchar for stable hashing / joins
+    return f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), {alias}.{_qident(col)}))), N'')"
+
+def _derived_expr(alias: str, inputs: list[str], out_len: int) -> str:
+    parts = [f"COALESCE({_sql_trim(alias, c)}, N'')" for c in inputs]
+    if not parts:
+        # Should never happen; keep deterministic
+        parts = ["N''"]
+    concat = " + N'|' + ".join(parts)
+    return f"LEFT(CONVERT(varchar(40), HASHBYTES('SHA1', CONVERT(varbinary(max), {concat})), 2), {int(out_len)})"
+
+tkey = f"{tgt_schema}.{tgt_table}".lower()
+derived_cfg = DERIVED_PK_REGISTRY.get(tkey, {})
+derived_map = derived_cfg.get("derived", {}) or {}
+
+# Which derived cols are active for this target?
+derived_cols_active: dict[str, dict] = {}
+for dcol, cfg in derived_map.items():
+    dcol_u = dcol.upper()
+    # only compute if target has it and PK uses it (common PPDM pattern)
+    if dcol_u in tgt_cols_u and dcol in pk_cols:
+        derived_cols_active[dcol] = cfg
+
+if derived_cols_active:
+    st.caption("Derived PK columns enabled: " + ", ".join(derived_cols_active.keys()))
 else:
-    key_cols = ["UWI"] if "UWI" in insert_cols else [insert_cols[0]]
+    st.caption("Derived PK columns: none for this target (or not configured).")
 
-if not key_cols:
-    # last resort
-    key_cols = [insert_cols[0]]
+# Validate derived inputs exist in view (fail fast with a friendly message)
+for dcol, cfg in derived_cols_active.items():
+    missing_inputs = [c for c in cfg.get("inputs", []) if c.upper() not in view_cols_u]
+    if missing_inputs:
+        st.error(
+            f"Derived column {dcol} configured with inputs not in NORM view: {missing_inputs}. "
+            f"Fix mapping / rebuild view or adjust DERIVED_PK_REGISTRY."
+        )
+        st.stop()
 
-st.caption(f"Existence check uses key columns: {', '.join(key_cols)}")
+# Build CROSS APPLY for derived cols
+cross_apply_sql = ""
+derived_u = {c.upper() for c in derived_cols_active.keys()}
+if derived_cols_active:
+    bits = []
+    for dcol, cfg in derived_cols_active.items():
+        expr = _derived_expr("v", cfg.get("inputs", []), int(cfg.get("len", 20)))
+        bits.append(f"{expr} AS {_qident(dcol)}")
+    cross_apply_sql = "CROSS APPLY (SELECT " + ", ".join(bits) + ") h"
 
-# ------------------------------------------------------------
-# Optional FK enforcement (child/station tables)
-#   - If exactly one FK exists, we enforce it by JOINing parent
-#   - If multiple FKs exist, we skip enforcement (still PK-safe)
-# ------------------------------------------------------------
-fk_name = None
-try:
-    fks = fetch_fk_map(conn, child_schema=tgt_schema, child_table=tgt_table)
-    if len(fks) == 1:
-        fk = fks[0]
-        # only enforce if all child FK cols are available in insert_cols
-        child_fk_cols = [cc for (cc, _pc) in fk.pairs]
-        if all(c in insert_cols for c in child_fk_cols):
-            fk_name = fk.fk_name
-except Exception:
-    fk_name = None
+# -----------------------------
+# Decide final insert column list
+# Start with insertable cols, then add derived PK cols if needed,
+# then add audit/guid defaults if present on target and not already included.
+# -----------------------------
+final_cols = list(insert_cols)
 
-if fk_name:
-    st.caption(f"FK enforcement enabled (single FK): {fk_name}")
-else:
-    st.caption("FK enforcement: off (0 or multiple FKs, or missing FK columns in insert set).")
-
-# ------------------------------------------------------------
-# Audit defaults (only used if those columns exist in insert_cols)
-# ------------------------------------------------------------
-# SELECT expressions (support audit defaults)
-loaded_by = "Perry M Stokes"
-who = (loaded_by or "").replace("'", "''")
-
-sel_exprs = []
-for c in insert_cols:
-    u = c.upper()
-
-    if who and u in {"ROW_CREATED_BY", "ROW_CHANGED_BY"}:
-        sel_exprs.append(f"N'{who}' AS {_qident(c)}")
-
-    elif u in {"ROW_CREATED_DATE", "ROW_CHANGED_DATE", "ROW_EFFECTIVE_DATE"}:
-        sel_exprs.append(f"SYSUTCDATETIME() AS {_qident(c)}")
-
-    elif u == "PPDM_GUID":
-        sel_exprs.append(f"CONVERT(nvarchar(36), NEWID()) AS {_qident(c)}")
-
+# Ensure all PK cols are present either from view or as derived
+for pk in pk_cols:
+    pku = pk.upper()
+    if pku in view_cols_u and pku in tgt_cols_u:
+        if view_cols_u[pku] not in final_cols:
+            final_cols.append(view_cols_u[pku])
+    elif pku in derived_u:
+        if pk not in final_cols:
+            final_cols.append(pk)
     else:
-        sel_exprs.append(f"v.{_qident(c)}")
+        st.error(
+            f"PK column '{pk}' is not available in NORM view and not derived. "
+            f"Cannot safely promote into {target_fqn}."
+        )
+        st.stop()
 
+# Add PPDM_GUID if target has it and it isn't already included
+if "PPDM_GUID" in tgt_cols_u and "PPDM_GUID" not in {c.upper() for c in final_cols}:
+    final_cols.append("PPDM_GUID")
 
-col_sql = ", ".join(_qident(c) for c in insert_cols)
-sel_sql = ", ".join(sel_exprs)
+# Add audit cols if target has them and not already included
+for a in ["ROW_CREATED_BY", "ROW_CREATED_DATE", "ROW_CHANGED_BY", "ROW_CHANGED_DATE", "ROW_EFFECTIVE_DATE"]:
+    if a in tgt_cols_u and a not in {c.upper() for c in final_cols}:
+        final_cols.append(a)
 
-key_not_null = " AND ".join(f"v.{_qident(k)} IS NOT NULL" for k in key_cols)
-exists_pred = " AND ".join(f"t.{_qident(k)} = v.{_qident(k)}" for k in key_cols)
+st.caption(f"Final insert column list: {len(final_cols)}")
+st.code(", ".join(final_cols))
 
-join_sql = ""
-if fk_name:
-    fk = next((x for x in fetch_fk_map(conn, child_schema=tgt_schema, child_table=tgt_table) if x.fk_name == fk_name), None)
-    if fk:
-        parent_full = _qfqn(fk.parent_schema, fk.parent_table)
-        preds = [f"p.{_qident(parent_col)} = v.{_qident(child_col)}" for (child_col, parent_col) in fk.pairs]
-        join_sql = f"JOIN {parent_full} p ON " + " AND ".join(preds)
+# -----------------------------
+# SELECT expression per column
+# -----------------------------
+def _select_expr(col: str) -> str:
+    u = col.upper()
+
+    # derived
+    if u in derived_u:
+        return f"h.{_qident(col)}"
+
+    # audit
+    if u in AUDIT_DEFAULTS:
+        return AUDIT_DEFAULTS[u]()
+
+    # PPDM_GUID
+    if u == "PPDM_GUID":
+        return "CONVERT(nvarchar(36), NEWID())"
+
+    # direct from view
+    if u in view_cols_u:
+        return f"v.{_qident(view_cols_u[u])}"
+
+    # fallback (should be rare; keep insert valid)
+    return "NULL"
+
+# -----------------------------
+# PK predicates for NOT EXISTS
+# - use v.pk for normal PK cols
+# - use h.pk for derived PK cols
+# -----------------------------
+pk_not_null_preds = []
+exists_preds = []
+
+for pk in pk_cols:
+    pku = pk.upper()
+    if pku in derived_u:
+        pk_not_null_preds.append(f"h.{_qident(pk)} IS NOT NULL")
+        exists_preds.append(f"t.{_qident(pk)} = h.{_qident(pk)}")
+    else:
+        pk_not_null_preds.append(f"v.{_qident(pk)} IS NOT NULL")
+        exists_preds.append(f"t.{_qident(pk)} = v.{_qident(pk)}")
+
+pk_not_null_sql = " AND ".join(pk_not_null_preds)
+exists_sql = " AND ".join(exists_preds)
+
+# -----------------------------
+# Build SQL
+# -----------------------------
+col_sql = ", ".join(_qident(c) for c in final_cols)
+sel_sql = ", ".join(f"{_select_expr(c)} AS {_qident(c)}" for c in final_cols)
 
 sql_count = f"""
 SET NOCOUNT ON;
 SELECT COUNT(*) AS would_insert
 FROM {norm_view} v
-{join_sql}
-WHERE {key_not_null}
-  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE {exists_pred});
+{cross_apply_sql}
+WHERE {pk_not_null_sql}
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {target_full} t
+      WHERE {exists_sql}
+  );
 """.strip()
 
 sql_insert = f"""
@@ -688,19 +882,33 @@ SET NOCOUNT ON;
 INSERT INTO {target_full} ({col_sql})
 SELECT {sel_sql}
 FROM {norm_view} v
-{join_sql}
-WHERE {key_not_null}
-  AND NOT EXISTS (SELECT 1 FROM {target_full} t WHERE {exists_pred});
+{cross_apply_sql}
+WHERE {pk_not_null_sql}
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {target_full} t
+      WHERE {exists_sql}
+  );
 """.strip()
 
+# -----------------------------
+# UI buttons
+# -----------------------------
 c1, c2 = st.columns([1, 1])
+
 if c1.button("Preview would-insert count", key="promote_preview"):
-    df = db.read_sql(conn, sql_count)
-    st.dataframe(_safe_df(df), hide_index=True, width="stretch")
+    try:
+        df = db.read_sql(conn, sql_count)
+        st.dataframe(_safe_df(df), hide_index=True, width="stretch")
+    except Exception as e:
+        st.error(f"Count failed: {e}")
 
 if c2.button("Promote now (insert new only)", type="primary", key="promote_insert"):
-    db.exec_sql(conn, sql_insert)
-    st.success("Promote completed.")
+    try:
+        db.exec_sql(conn, sql_insert)
+        st.success("Promote completed.")
+    except Exception as e:
+        st.error(f"Promote failed: {e}")
 
 with st.expander("Promote SQL", expanded=False):
     st.code(sql_count, language="sql")
