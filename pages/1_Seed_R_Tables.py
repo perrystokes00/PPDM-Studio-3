@@ -2,563 +2,458 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
 
-import ppdm_loader.db as db  # db.read_sql, db.exec_sql
-from common.ui import sidebar_connect
+import ppdm_loader.db as db
+from common.ui import sidebar_connect, require_connection
+from ppdm_loader.seed_generic import (
+    MapRow,
+    fetch_table_columns,
+    preview_missing_by_pk,
+    build_src_frame_from_mapping,
+    seed_missing_rows,
+)
 
-sidebar_connect()
+# ============================================================
+# Page setup
+# ============================================================
+st.set_page_config(page_title="Seed R Tables", layout="wide")
+sidebar_connect(page_prefix="seedr")
+conn = require_connection()
+
+DEFAULT_LOADED_BY = "Perry M Stokes"
+
+# Default registry paths (adjust if yours differ)
+REG_PPDM39 = Path(r"C:\Users\perry\OneDrive\Documents\PPDM\ETL-4\schema_registry\catalog\ppdm_39_schema_domain.json")
+REG_LITE = Path(r"C:\Users\perry\OneDrive\Documents\PPDM\ETL-4\schema_registry\catalog\ppdm_lite_schema_catalog.json")
 
 
 # ============================================================
-# Helpers
+# Small helpers
 # ============================================================
-_AUDIT_COLS = {
-    "RID",
-    "PPDM_GUID",
-    "ROW_CREATED_BY", "ROW_CREATED_DATE",
-    "ROW_CHANGED_BY", "ROW_CHANGED_DATE",
-    "ROW_EFFECTIVE_DATE", "ROW_EXPIRY_DATE",
-    "EFFECTIVE_DATE", "EXPIRY_DATE",
-    "ROW_QUALITY",
-    "REMARK",
-}
+def _safe_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    return df if (df is not None and isinstance(df, pd.DataFrame) and not df.empty) else pd.DataFrame()
 
 
-def _quote_ident(name: str) -> str:
-    name = (name or "").replace("]", "]]")
-    return f"[{name}]"
-
-
-def _fqn_quoted(schema: str, table: str) -> str:
-    return f"{_quote_ident(schema)}.{_quote_ident(table)}"
-
-
-def _normalize_series(s: pd.Series) -> pd.Series:
-    s = s.astype(str).str.strip()
-    s = s.replace({"": None, "nan": None, "None": None})
-    return s
-
-
-def table_columns_set(conn, schema: str, table: str) -> set[str]:
-    sql = """
-    SELECT c.name AS column_name
-    FROM sys.schemas s
-    JOIN sys.tables  t ON t.schema_id = s.schema_id
-    JOIN sys.columns c ON c.object_id = t.object_id
-    WHERE s.name = ?
-      AND t.name = ?
-    ORDER BY c.column_id;
-    """
-    df = db.read_sql(conn, sql, params=[schema, table])
-    if df is None or df.empty:
-        return set()
-    return {str(x).strip().upper() for x in df["column_name"].tolist()}
-
-
-def _get_col_type(conn, schema: str, table: str, col: str) -> str | None:
-    sql = """
-    SELECT c.DATA_TYPE
-    FROM INFORMATION_SCHEMA.COLUMNS c
-    WHERE c.TABLE_SCHEMA = ?
-      AND c.TABLE_NAME = ?
-      AND c.COLUMN_NAME = ?;
-    """
-    df = db.read_sql(conn, sql, params=[schema, table, col])
-    if df is None or df.empty:
-        return None
-    return str(df.iloc[0]["DATA_TYPE"]).strip().lower()
-
-
-def resolve_best_single_pk(conn, schema: str, table: str) -> str | None:
-    # Try PK constraint first
-    pk_sql = """
-    SELECT kcu.COLUMN_NAME, kcu.ORDINAL_POSITION
-    FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-    JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-      ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-     AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-     AND tc.TABLE_NAME = kcu.TABLE_NAME
-    WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-      AND tc.TABLE_SCHEMA = ?
-      AND tc.TABLE_NAME = ?
-    ORDER BY kcu.ORDINAL_POSITION;
-    """
+def _db_name(conn) -> str:
     try:
-        df = db.read_sql(conn, pk_sql, params=[schema, table])
-        if df is not None and not df.empty:
-            cols = [str(x).strip() for x in df["COLUMN_NAME"].tolist() if str(x).strip()]
-            if len(cols) == 1:
-                return cols[0]
-            return None  # composite PK -> not supported in this quick seeder
+        d = db.read_sql(conn, "SELECT DB_NAME() AS db;")
+        if d is not None and not d.empty:
+            return str(d.iloc[0]["db"])
     except Exception:
         pass
-
-    # Otherwise heuristic: common PPDM-ish “code” keys
-    cols = table_columns_set(conn, schema, table)
-    if not cols:
-        return None
-
-    for cand in ("CODE", "TYPE", "STATUS", "SOURCE", "NAME"):
-        if cand in cols:
-            return cand
-
-    # Any *_ID that isn't audit
-    id_cols = [c for c in cols if c.endswith("_ID") and c not in _AUDIT_COLS]
-    if len(id_cols) == 1:
-        return id_cols[0]
-    if id_cols:
-        return id_cols[0]
-
-    # last resort: first non-audit col
-    non_audit = [c for c in cols if c not in _AUDIT_COLS]
-    return non_audit[0] if non_audit else None
+    return ""
 
 
-def list_ref_tables(conn, schema: str = "dbo", include_ra: bool = True) -> list[str]:
-    # r_ + optionally ra_
-    like_parts = ["t.name LIKE 'r[_]%' ESCAPE '\\'"]
-    if include_ra:
-        like_parts.append("t.name LIKE 'ra[_]%' ESCAPE '\\'")
+def _pick_registry_path() -> Path:
+    model = (st.session_state.get("ppdm_model") or st.session_state.get("ppdm_version") or "").lower()
+    if "lite" in model:
+        return REG_LITE
+    return REG_PPDM39
 
-    where_like = " OR ".join(like_parts)
 
-    sql = f"""
-    SELECT s.name AS schema_name, t.name AS table_name
-    FROM sys.tables t
-    JOIN sys.schemas s ON s.schema_id = t.schema_id
-    WHERE s.name = ?
-      AND ({where_like})
-    ORDER BY t.name;
+@st.cache_data(show_spinner=False)
+def _load_registry_df(json_path: str) -> pd.DataFrame:
+    p = Path(json_path)
+    if not p.exists():
+        return pd.DataFrame(columns=["schema", "table", "column", "is_pk"])
+
+    obj = json.loads(p.read_text(encoding="utf-8"))
+
+    # Accept both shapes:
+    #  (A) wrapper dict: { "ppdm_39_schema_domain": [rows] } etc.
+    #  (B) raw list: [rows]
+    if isinstance(obj, dict):
+        data = (
+            obj.get("ppdm_39_schema_domain")
+            or obj.get("ppdm_lite_schema_domain")
+            or obj.get("schema_domain")
+            or obj.get("rows")
+            or obj.get("data")
+            or []
+        )
+    elif isinstance(obj, list):
+        data = obj
+    else:
+        data = []
+
+    rows: list[dict[str, Any]] = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        rows.append(
+            {
+                "schema": (r.get("table_schema") or "dbo"),
+                "table": r.get("table_name") or "",
+                "column": r.get("column_name") or "",
+                "is_pk": str(r.get("is_primary_key") or "").strip().upper() in {"YES", "Y", "TRUE", "1"},
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["schema", "table", "column", "is_pk"])
+
+    df = df[df["table"].astype(str).str.len() > 0]
+    df = df[df["column"].astype(str).str.len() > 0]
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def _list_r_tables(reg: pd.DataFrame) -> list[str]:
+    t = reg[["schema", "table"]].drop_duplicates()
+    tl = t["table"].astype(str).str.lower()
+    t = t[tl.str.startswith("r_") | tl.str.startswith("ra_")]
+    out = [f"{r.schema}.{r.table}" for r in t.itertuples(index=False)]
+    return sorted(out, key=lambda s: s.lower())
+
+
+@st.cache_data(show_spinner=False)
+def _table_columns_from_reg(reg: pd.DataFrame, schema: str, table: str) -> list[str]:
+    df = reg[(reg["schema"] == schema) & (reg["table"] == table)]
+    return df["column"].astype(str).tolist()
+
+
+@st.cache_data(show_spinner=False)
+def _pk_columns_from_reg(reg: pd.DataFrame, schema: str, table: str) -> list[str]:
+    df = reg[(reg["schema"] == schema) & (reg["table"] == table) & (reg["is_pk"] == True)]
+    return df["column"].astype(str).tolist()
+
+
+def _read_uploaded_table(uploaded) -> pd.DataFrame:
+    if uploaded is None:
+        return pd.DataFrame()
+    name = (uploaded.name or "").lower()
+
+    try:
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            return pd.read_excel(uploaded, dtype=str).fillna("")
+        # default csv/txt
+        return pd.read_csv(uploaded, dtype=str, keep_default_na=False, engine="python").fillna("")
+    except Exception as e:
+        st.error(f"Could not read upload: {e}")
+        return pd.DataFrame()
+
+
+def _load_seed_json(json_file) -> dict[str, Any]:
+    if json_file is None:
+        return {}
+    try:
+        raw = json_file.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        obj = json.loads(raw)
+        return obj if isinstance(obj, (dict, list)) else {}
+    except Exception as e:
+        st.error(f"Could not parse seed JSON: {e}")
+        return {}
+
+
+def _extract_rows_for_table(seed_obj: Any, target_fqn: str) -> list[dict[str, Any]]:
     """
-    df = db.read_sql(conn, sql, params=[schema])
-    if df is None or df.empty:
+    Accepts:
+      - dict mapping table->rows
+      - dict wrapper with "tables": {...}
+      - list of rows (assumes it is already for the table)
+    Tries keys: exact "dbo.r_x", "r_x", case-insensitive.
+    """
+    if seed_obj is None:
         return []
-    return [f"{r['schema_name']}.{r['table_name']}" for _, r in df.iterrows()]
 
+    if isinstance(seed_obj, list):
+        # assume list already rows
+        rows = [r for r in seed_obj if isinstance(r, dict)]
+        return rows
 
-def preview_missing_codes_df(
-    conn,
-    *,
-    target_schema: str,
-    target_table: str,
-    pk_col: str,
-    items: list[dict[str, Any]],
-    top_n: int = 2000,
-) -> tuple[pd.DataFrame, int]:
-    tgt = _fqn_quoted(target_schema, target_table)
-    pkq = _quote_ident(pk_col)
+    if not isinstance(seed_obj, dict):
+        return []
 
-    payload = json.dumps(items, ensure_ascii=False)
+    # unwrap common wrappers
+    if "tables" in seed_obj and isinstance(seed_obj["tables"], dict):
+        seed_obj = seed_obj["tables"]
 
-    sql_sample = f"""
-;WITH src AS (
-    SELECT DISTINCT
-        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.code))), N'') AS code
-    FROM OPENJSON(?)
-    WITH (code nvarchar(4000) '$.code') j
-),
-missing AS (
-    SELECT s.code
-    FROM src s
-    WHERE s.code IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM {tgt} t
-          WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{pkq}))), N'') = s.code
-      )
-)
-SELECT TOP ({int(top_n)}) code
-FROM missing
-ORDER BY code;
-""".strip()
+    want = target_fqn.strip()
+    want_l = want.lower()
+    want_no_schema = want.split(".", 1)[-1].lower()
 
-    df_sample = db.read_sql(conn, sql_sample, params=[payload])
-    if df_sample is None or df_sample.empty:
-        df_sample = pd.DataFrame({"code": []})
+    # direct matches
+    for k in (want, want_l, want_no_schema):
+        if k in seed_obj and isinstance(seed_obj[k], list):
+            return [r for r in seed_obj[k] if isinstance(r, dict)]
 
-    sql_count = f"""
-;WITH src AS (
-    SELECT DISTINCT
-        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.code))), N'') AS code
-    FROM OPENJSON(?)
-    WITH (code nvarchar(4000) '$.code') j
-),
-missing AS (
-    SELECT s.code
-    FROM src s
-    WHERE s.code IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM {tgt} t
-          WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{pkq}))), N'') = s.code
-      )
-)
-SELECT COUNT(*) AS missing_total
-FROM missing;
-""".strip()
-
-    df_count = db.read_sql(conn, sql_count, params=[payload])
-    missing_total = 0
-    if df_count is not None and not df_count.empty:
-        missing_total = int(df_count.iloc[0]["missing_total"])
-
-    return df_sample, missing_total
-
-
-def seed_missing_codes(
-    conn,
-    *,
-    target_schema: str,
-    target_table: str,
-    pk_col: str,
-    items: list[dict[str, Any]],
-    long_name_mode: str = "none",  # none | code | column
-    defaults: dict[str, Any] | None = None,
-    loaded_by: str = "Perry M Stokes",
-    set_audit: bool = True,
-) -> int:
-    """
-    Insert-only seeding. Adds optional LONG_NAME/ACTIVE_IND/PPDM_GUID and
-    (optionally) audit columns if they exist on the target table.
-    """
-    defaults = defaults or {}
-    long_name_mode = (long_name_mode or "none").strip().lower()
-    loaded_by = (loaded_by or "Perry M Stokes").strip() or "Perry M Stokes"
-
-    tgt_cols = table_columns_set(conn, target_schema, target_table)
-    pk_u = pk_col.strip().upper()
-    if pk_u not in tgt_cols:
-        raise ValueError(f"PK column '{pk_col}' not found on {target_schema}.{target_table}")
-
-    has_long_name = "LONG_NAME" in tgt_cols
-    has_active = "ACTIVE_IND" in tgt_cols
-    has_guid = "PPDM_GUID" in tgt_cols
-
-    # audit columns presence
-    has_rcb = "ROW_CREATED_BY" in tgt_cols
-    has_rcd = "ROW_CREATED_DATE" in tgt_cols
-    has_rchb = "ROW_CHANGED_BY" in tgt_cols
-    has_rchd = "ROW_CHANGED_DATE" in tgt_cols
-    has_red = "ROW_EFFECTIVE_DATE" in tgt_cols
-
-    insert_cols: list[str] = [pk_col.strip()]
-    select_exprs: list[str] = ["m.code"]
-    already = {c.upper() for c in insert_cols}
-
-    # LONG_NAME
-    if has_long_name and long_name_mode != "none":
-        insert_cols.append("LONG_NAME")
-        if long_name_mode == "code":
-            select_exprs.append("m.code")
-        elif long_name_mode == "column":
-            select_exprs.append("COALESCE(m.long_name, m.code)")
-        else:
-            raise ValueError(f"Unknown long_name_mode: {long_name_mode}")
-        already.add("LONG_NAME")
-
-    # ACTIVE_IND (type-aware)
-    if has_active and "ACTIVE_IND" not in already and defaults.get("ACTIVE_IND", None) is not None:
-        active_val = defaults.get("ACTIVE_IND", "Y")
-        active_type = _get_col_type(conn, target_schema, target_table, "ACTIVE_IND")
-
-        insert_cols.append("ACTIVE_IND")
-        if active_type in ("bit",):
-            select_exprs.append("CAST(1 AS bit)" if str(active_val).strip().upper() in ("Y", "YES", "TRUE", "1") else "CAST(0 AS bit)")
-        elif active_type in ("int", "smallint", "tinyint", "bigint"):
-            select_exprs.append("1" if str(active_val).strip().upper() in ("Y", "YES", "TRUE", "1") else "0")
-        else:
-            vv = str(active_val).replace("'", "''")
-            select_exprs.append(f"N'{vv}'")
-        already.add("ACTIVE_IND")
-
-    # PPDM_GUID if exists
-    if has_guid and "PPDM_GUID" not in already:
-        insert_cols.append("PPDM_GUID")
-        select_exprs.append("CONVERT(nvarchar(36), NEWID())")
-        already.add("PPDM_GUID")
-
-    # Audit columns (insert-only => created/changed same)
-    if set_audit:
-        by_sql = "N'" + loaded_by.replace("'", "''") + "'"
-        now_sql = "SYSUTCDATETIME()"
-
-        if has_rcb and "ROW_CREATED_BY" not in already:
-            insert_cols.append("ROW_CREATED_BY")
-            select_exprs.append(by_sql)
-            already.add("ROW_CREATED_BY")
-        if has_rcd and "ROW_CREATED_DATE" not in already:
-            insert_cols.append("ROW_CREATED_DATE")
-            select_exprs.append(now_sql)
-            already.add("ROW_CREATED_DATE")
-        if has_rchb and "ROW_CHANGED_BY" not in already:
-            insert_cols.append("ROW_CHANGED_BY")
-            select_exprs.append(by_sql)
-            already.add("ROW_CHANGED_BY")
-        if has_rchd and "ROW_CHANGED_DATE" not in already:
-            insert_cols.append("ROW_CHANGED_DATE")
-            select_exprs.append(now_sql)
-            already.add("ROW_CHANGED_DATE")
-        if has_red and "ROW_EFFECTIVE_DATE" not in already:
-            insert_cols.append("ROW_EFFECTIVE_DATE")
-            select_exprs.append(now_sql)
-            already.add("ROW_EFFECTIVE_DATE")
-
-    col_list = ", ".join(_quote_ident(c) for c in insert_cols)
-    sel_list = ", ".join(select_exprs)
-
-    tgt = _fqn_quoted(target_schema, target_table)
-    pkq = _quote_ident(pk_col)
-
-    # clean distinct payload (case-insensitive)
-    clean_items: list[dict[str, Any]] = []
-    seen = set()
-    for it in items:
-        code = str((it.get("code") or "")).strip()
-        if not code:
+    # case-insensitive search
+    for k, v in seed_obj.items():
+        if not isinstance(k, str):
             continue
-        key = code.upper()
-        if key in seen:
-            continue
-        seen.add(key)
-        ln = it.get("long_name")
-        ln = str(ln).strip() if ln is not None and str(ln).strip() else None
-        clean_items.append({"code": code, "long_name": ln})
+        kl = k.lower().strip()
+        if kl == want_l or kl == want_no_schema:
+            if isinstance(v, list):
+                return [r for r in v if isinstance(r, dict)]
 
-    if not clean_items:
-        return 0
-
-    payload = json.dumps(clean_items, ensure_ascii=False)
-
-    sql = f"""
-;WITH src AS (
-    SELECT DISTINCT
-        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.code))), N'') AS code,
-        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.long_name))), N'') AS long_name
-    FROM OPENJSON(?)
-    WITH (
-        code      nvarchar(4000) '$.code',
-        long_name nvarchar(4000) '$.long_name'
-    ) j
-),
-missing AS (
-    SELECT s.code, s.long_name
-    FROM src s
-    WHERE s.code IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM {tgt} t
-          WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{pkq}))), N'') = s.code
-      )
-)
-INSERT INTO {tgt} ({col_list})
-SELECT {sel_list}
-FROM missing m;
-""".strip()
-
-    cur = conn.cursor()
-    cur.execute(sql, (payload,))
-    inserted = cur.rowcount if cur.rowcount is not None else 0
-    conn.commit()
-    return int(inserted)
+    return []
 
 
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="Seed r_/ra_ tables", layout="wide")
-st.title("Seed r_ / ra_ tables (drag & drop)")
+st.title("Seed R Tables (fast registry + JSON seed option)")
 
-conn = st.session_state.get("conn")
-if conn is None:
-    st.error("Not connected. Use the Launchpad sidebar to connect first.")
-    st.stop()
-
-# sanity: make sure this is a DBAPI connection, not a string
-if isinstance(conn, str) or not hasattr(conn, "cursor"):
-    st.error(f"Session 'conn' is not a live DB connection: {type(conn)}. Reconnect in the sidebar.")
-    st.stop()
-
-with st.expander("🔎 Debug: connection + target sanity", expanded=True):
+with st.expander("🔎 Debug: connection sanity", expanded=False):
     who = db.read_sql(conn, "SELECT @@SERVERNAME AS server_name, DB_NAME() AS database_name;")
-    st.dataframe(who, hide_index=True, width="stretch")
-    try:
-        rc = db.read_sql(conn, "SELECT COUNT(*) AS r_source_rows FROM dbo.r_source;")
-        st.dataframe(rc, hide_index=True, width="stretch")
-    except Exception as e:
-        st.caption(f"dbo.r_source not readable here: {e}")
+    st.dataframe(_safe_df(who), hide_index=True, width="stretch")
 
-st.caption("Drop a CSV/TXT, pick the target reference table, compute missing codes, then seed missing (insert-only).")
+# ---- registry picker ----
+cR1, cR2 = st.columns([2, 3])
+with cR1:
+    reg_default = _pick_registry_path()
+    reg_path_txt = st.text_input("Schema registry JSON path", value=str(reg_default), key="seedr_reg_path")
+with cR2:
+    st.caption("Registry drives table list + PK detection (fast).")
 
-up = st.file_uploader("Drop CSV/TXT here", type=["csv", "txt"], key="rseed_upload")
-if not up:
+reg_df = _load_registry_df(reg_path_txt)
+if reg_df.empty:
+    st.error(f"Registry not found/empty: {reg_path_txt}")
     st.stop()
 
-sep = st.selectbox("Delimiter", [",", "\t", "|", ";"], index=0, key="rseed_sep")
-
-df = pd.read_csv(up, sep=sep, dtype=str, keep_default_na=False)
-df.columns = [str(c).strip().upper() for c in df.columns]
-
-st.subheader("Preview")
-st.dataframe(df.head(50), hide_index=True, width="stretch")
-st.caption(f"Rows: {len(df):,} | Columns: {len(df.columns)}")
-
-# table selection
-st.subheader("Target table")
-schema = st.text_input("Schema", value="dbo", key="rseed_schema").strip() or "dbo"
-include_ra = st.checkbox("Include ra_ tables", value=True, key="rseed_include_ra")
-
-tables = [""] + list_ref_tables(conn, schema=schema, include_ra=include_ra)
-target_fqn = st.selectbox("Target r_/ra_ table", options=tables, key="rseed_target_fqn")
-if not target_fqn:
+r_tables = _list_r_tables(reg_df)
+if not r_tables:
+    st.error("No r_/ra_ tables found in registry.")
     st.stop()
+
+# ---- select target table ----
+dbn = _db_name(conn)
+target_fqn = st.selectbox("Target R/RA table", r_tables, key="seedr_target_fqn")
+
+# reset derived state when target changes (fixes stale UI)
+ss = st.session_state
+target_sig = {"target_fqn": target_fqn, "db": dbn}
+if ss.get("seedr_target_sig") != target_sig:
+    ss["seedr_target_sig"] = target_sig
+    for k in ["seedr_src_df", "seedr_map_df", "seedr_missing_df", "seedr_missing_total", "seedr_insert_df"]:
+        ss.pop(k, None)
 
 t_schema, t_table = target_fqn.split(".", 1)
+t_cols = _table_columns_from_reg(reg_df, t_schema, t_table)
+pk_cols = _pk_columns_from_reg(reg_df, t_schema, t_table)
 
-# PK
-pk_guess = resolve_best_single_pk(conn, t_schema, t_table) or ""
-pk_col = st.text_input("PK column (auto-detected)", value=pk_guess, key="rseed_pk_col").strip()
-if not pk_col:
-    st.warning("Enter a PK column (single-column PK only for this quick seeder).")
+cA, cB = st.columns([2, 3])
+with cA:
+    st.caption("Target PK (from registry)")
+    st.code(", ".join(pk_cols) if pk_cols else "(none detected)")
+with cB:
+    st.caption("Target columns (from registry)")
+    st.code(", ".join(t_cols) if t_cols else "(none)")
+
+if not pk_cols:
+    st.error("PK not detected for this table in the registry JSON. Seeding requires PK for safe missing checks.")
     st.stop()
 
-# source column
-st.subheader("Source mapping (from file)")
-default_code_col = "CODE" if "CODE" in df.columns else (df.columns[0] if len(df.columns) else "")
-src_col = st.selectbox(
-    "Code column in file",
-    options=[""] + df.columns.tolist(),
-    index=(df.columns.tolist().index(default_code_col) + 1 if default_code_col in df.columns else 0),
-    key="rseed_src_col",
-)
-if not src_col:
-    st.stop()
+st.divider()
 
-# LONG_NAME strategy (safe default)
-long_mode = st.selectbox(
-    "LONG_NAME strategy",
-    ["none", "code", "column"],
-    index=2 if "LONG_NAME" in df.columns else 0,  # safe default
-    key="rseed_long_mode",
-)
-ln_col = st.selectbox(
-    "LONG_NAME column in file (only if strategy=column)",
-    options=[""] + df.columns.tolist(),
-    disabled=(long_mode != "column"),
-    key="rseed_ln_col",
-)
-
-# Audit behavior
-st.subheader("Defaults")
-loaded_by = st.text_input("Loaded by (ROW_CREATED_BY / ROW_CHANGED_BY)", value="Perry M Stokes", key="rseed_loaded_by")
-set_audit = st.checkbox("Auto-populate audit columns if present", value=True, key="rseed_set_audit")
-
-# ACTIVE default (safe OFF)
-default_active = st.checkbox("Set ACTIVE_IND (if column exists)", value=False, key="rseed_default_active")
-
-top_n = st.number_input("Show top N missing", min_value=10, max_value=50000, value=2000, step=100, key="rseed_topn")
+# ============================================================
+# STEP 1 — Load source (JSON seed OR file upload)
+# ============================================================
+st.header("Step 1 — Provide source rows (JSON seed OR upload file)")
 
 c1, c2 = st.columns([1, 1])
+
 with c1:
-    compute_btn = st.button("Compute missing", key="rseed_compute", type="primary")
+    st.subheader("Option A — Load from JSON seed file (recommended)")
+    seed_json_up = st.file_uploader(
+        "Seed JSON file",
+        type=["json"],
+        key="seedr_seed_json_upload",
+        help="Expected: { 'dbo.r_x': [ {...}, ... ] } or { 'tables': { 'dbo.r_x': [...] } }",
+    )
+    if st.button("Use seed JSON for this table", type="primary", key="seedr_use_seed_json"):
+        seed_obj = _load_seed_json(seed_json_up)
+        rows = _extract_rows_for_table(seed_obj, target_fqn)
+        if not rows:
+            st.error(f"No rows found in seed JSON for key '{target_fqn}' (or '{t_table}').")
+        else:
+            df = pd.DataFrame(rows)
+            # normalize to strings
+            for col in df.columns:
+                df[col] = df[col].astype(str)
+            ss["seedr_src_df"] = df
+            st.success(f"Loaded {len(df)} rows from seed JSON for {target_fqn}.")
+
 with c2:
-    seed_btn = st.button("Seed missing now", key="rseed_seed", type="secondary")
+    st.subheader("Option B — Upload CSV/TXT/XLSX (fallback)")
+    up = st.file_uploader("Drop file here", type=["csv", "txt", "xlsx", "xls"], key="seedr_src_upload")
+    if st.button("Use uploaded file", key="seedr_use_upload", type="secondary"):
+        df = _read_uploaded_table(up)
+        if df.empty:
+            st.error("No rows read from upload.")
+        else:
+            ss["seedr_src_df"] = df
+            st.success(f"Loaded {len(df)} rows from upload.")
 
+src_df = ss.get("seedr_src_df")
+if src_df is None or not isinstance(src_df, pd.DataFrame) or src_df.empty:
+    st.info("Load source rows using Option A or Option B to continue.")
+    st.stop()
 
-def build_items_from_file() -> list[dict[str, Any]]:
-    codes = _normalize_series(df[src_col]).dropna().tolist()
+st.caption("Source preview")
+st.dataframe(src_df.head(25), hide_index=True, width="stretch")
 
-    ln_map: dict[str, str] = {}
-    if long_mode == "column" and ln_col:
-        tmp = df[[src_col, ln_col]].copy()
-        tmp[src_col] = _normalize_series(tmp[src_col])
-        tmp[ln_col] = _normalize_series(tmp[ln_col])
-        tmp = tmp.dropna(subset=[src_col])
-        tmp = tmp.drop_duplicates(subset=[src_col], keep="first")
-        for _, r in tmp.iterrows():
-            c = r[src_col]
-            ln = r[ln_col]
-            if c is not None:
-                ln_map[str(c)] = (str(ln).strip() if ln is not None else None)
+src_cols = [str(c) for c in src_df.columns.tolist()]
 
-    out: list[dict[str, Any]] = []
-    for c in codes:
-        cc = str(c).strip()
-        if not cc:
-            continue
-        out.append({"code": cc, "long_name": ln_map.get(cc)})
+st.divider()
 
-    seen = set()
-    dedup = []
-    for it in out:
-        key = it["code"].upper()
-        if key not in seen:
-            dedup.append(it)
-            seen.add(key)
-    return dedup
+# ============================================================
+# STEP 2 — Mapping grid (target cols ← source cols)
+# ============================================================
+st.header("Step 2 — Map source columns → target columns")
 
+# build/refresh default mapping if needed
+map_sig = {
+    "target_fqn": target_fqn,
+    "src_cols": tuple([c.upper() for c in src_cols]),
+}
+if ss.get("seedr_map_sig") != map_sig or "seedr_map_df" not in ss:
+    src_u = {c.upper(): c for c in src_cols}
+    rows = []
+    for tgt in t_cols:
+        guess = src_u.get(str(tgt).upper(), "")
+        rows.append(
+            {
+                "use": True if (guess or str(tgt).upper() in {p.upper() for p in pk_cols}) else False,
+                "target_column": tgt,
+                "source_column": guess,
+                "constant_value": "",
+                "transform": "trim",
+            }
+        )
+    ss["seedr_map_df"] = pd.DataFrame(rows)[
+        ["use", "target_column", "source_column", "constant_value", "transform"]
+    ]
+    ss["seedr_map_sig"] = map_sig
 
-if compute_btn:
+with st.form("seedr_map_form", clear_on_submit=False, border=True):
+    edited = st.data_editor(
+        ss["seedr_map_df"],
+        width="stretch",
+        num_rows="fixed",
+        column_config={
+            "use": st.column_config.CheckboxColumn("Use"),
+            "target_column": st.column_config.TextColumn("Target column", disabled=True),
+            "source_column": st.column_config.SelectboxColumn(
+                "Source column (dropdown)", options=[""] + src_cols
+            ),
+            "constant_value": st.column_config.TextColumn("Constant (optional)"),
+            "transform": st.column_config.SelectboxColumn("Transform", options=["none", "trim", "upper"]),
+        },
+        key="seedr_map_editor",
+    )
+    apply_map = st.form_submit_button("Apply mapping", type="primary")
+
+if apply_map:
+    ss["seedr_map_df"] = edited.copy()
+    st.success("Mapping saved.")
+
+map_df = ss["seedr_map_df"]
+
+st.divider()
+
+# ============================================================
+# STEP 3 — Build insert_df from mapping
+# ============================================================
+st.header("Step 3 — Build insert set (from mapping)")
+
+mapping: list[MapRow] = []
+for r in map_df.to_dict(orient="records"):
+    mapping.append(
+        MapRow(
+            target_column=str(r.get("target_column") or "").strip(),
+            use=bool(r.get("use", False)),
+            source_column=str(r.get("source_column") or "").strip(),
+            constant_value=str(r.get("constant_value") or ""),
+            transform=str(r.get("transform") or "trim"),
+        )
+    )
+
+insert_df = build_src_frame_from_mapping(src_df, mapping)
+if insert_df.empty:
+    st.warning("Resulting insert_df is empty. Check mapping and source data.")
+    st.stop()
+
+ss["seedr_insert_df"] = insert_df
+st.caption("Insert DF preview (first 25)")
+st.dataframe(insert_df.head(25), hide_index=True, width="stretch")
+
+missing_pk = [c for c in pk_cols if c not in insert_df.columns]
+if missing_pk:
+    st.error(f"Insert DF is missing PK column(s): {missing_pk}. Map them before seeding.")
+    st.stop()
+
+st.divider()
+
+# ============================================================
+# STEP 4 — Preview missing (by PK)
+# ============================================================
+st.header("Step 4 — Preview missing PK rows (what will be inserted)")
+
+top_n = st.number_input("Show top N missing", 10, 50000, 500, 50, key="seedr_topn")
+
+if st.button("Compute missing", type="primary", key="seedr_compute_missing"):
     try:
-        items = build_items_from_file()
-        miss_df, miss_total = preview_missing_codes_df(
+        miss_df, miss_total = preview_missing_by_pk(
             conn,
             target_schema=t_schema,
             target_table=t_table,
-            pk_col=pk_col,
-            items=items,
+            pk_cols=pk_cols,
+            src_df=insert_df,
             top_n=int(top_n),
         )
-        st.session_state["rseed_items"] = items
-        st.session_state["rseed_missing_df"] = miss_df
-        st.session_state["rseed_missing_total"] = miss_total
-        st.success("Missing computed.")
+        ss["seedr_missing_df"] = miss_df
+        ss["seedr_missing_total"] = miss_total
     except Exception as e:
-        st.error(f"Compute missing failed: {e}")
+        st.error(f"Missing preview failed: {e}")
 
-missing_df = st.session_state.get("rseed_missing_df")
-missing_total = st.session_state.get("rseed_missing_total", None)
+miss_df = ss.get("seedr_missing_df")
+miss_total = ss.get("seedr_missing_total")
 
-if missing_df is not None:
-    st.subheader("Missing codes")
-    st.dataframe(missing_df, hide_index=True, width="stretch")
-    shown = len(missing_df) if isinstance(missing_df, pd.DataFrame) else 0
-    tot = int(missing_total) if missing_total is not None else 0
-    st.caption(f"Missing shown: {shown:,} (sample) | Missing total: {tot:,}")
+if isinstance(miss_total, int):
+    st.caption(f"Missing total: {miss_total}")
 
-if seed_btn:
+if isinstance(miss_df, pd.DataFrame) and not miss_df.empty:
+    st.dataframe(miss_df, hide_index=True, width="stretch")
+
+st.divider()
+
+# ============================================================
+# STEP 5 — Seed missing (insert only missing)
+# ============================================================
+st.header("Step 5 — Seed missing rows")
+
+loaded_by = st.text_input("Loaded by", value=DEFAULT_LOADED_BY, key="seedr_loaded_by")
+
+if st.button("Seed missing now", type="primary", key="seedr_seed_now"):
     try:
-        items = st.session_state.get("rseed_items") or build_items_from_file()
-        defaults = {"ACTIVE_IND": "Y"} if default_active else {}
-        inserted = seed_missing_codes(
+        # IMPORTANT: seed_generic checks actual target columns (so no bogus PPDM_GUID/audit cols)
+        inserted = seed_missing_rows(
             conn,
             target_schema=t_schema,
             target_table=t_table,
-            pk_col=pk_col,
-            items=items,
-            long_name_mode=long_mode,
-            defaults=defaults,
+            pk_cols=pk_cols,
+            insert_df=insert_df,
             loaded_by=loaded_by,
-            set_audit=set_audit,
         )
-        st.success(f"Seed completed. Inserted {inserted:,} row(s). Recomputing missing…")
-
-        miss_df2, miss_total2 = preview_missing_codes_df(
-            conn,
-            target_schema=t_schema,
-            target_table=t_table,
-            pk_col=pk_col,
-            items=items,
-            top_n=int(top_n),
-        )
-        st.session_state["rseed_missing_df"] = miss_df2
-        st.session_state["rseed_missing_total"] = miss_total2
-
-        st.subheader("Missing after seeding")
-        st.dataframe(miss_df2, hide_index=True, width="stretch")
-        st.caption(f"Missing shown: {len(miss_df2):,} (sample) | Missing total: {int(miss_total2):,}")
+        st.success(f"Seed completed. Inserted rows: {inserted}")
+        # refresh missing preview after insert
+        ss.pop("seedr_missing_df", None)
+        ss.pop("seedr_missing_total", None)
     except Exception as e:
-        st.error(f"Seeding failed: {e}")
+        st.error(f"Seed failed: {e}")
+
+with st.expander("Notes", expanded=False):
+    st.write(
+        "- This page uses the schema-registry JSON for fast table+PK detection.\n"
+        "- Seeding inserts **only missing PK tuples** (safe, idempotent).\n"
+        "- PPDM_GUID/audit columns are only injected if they exist on the actual target table."
+    )

@@ -7,7 +7,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 import ppdm_loader.db as db
-
+import json
 
 # ------------------------------------------------------------
 # Small helpers
@@ -21,7 +21,6 @@ _AUDIT_COLS = {
     "ROW_EXPIRY_DATE",
     "ROW_QUALITY",
     "REMARK",
-    "EFFECTIVE_DATE", "EXPIRY_DATE",
 }
 
 def qident(name: str) -> str:
@@ -140,46 +139,46 @@ def build_src_frame_from_mapping(
         out = out.dropna(how="all")
     return out
 
-
 def preview_missing_by_pk(
     conn,
     *,
     target_schema: str,
     target_table: str,
     pk_cols: list[str],
-    src_df: pd.DataFrame,
-    top_n: int = 2000,
+    items: list[dict[str, Any]] | None = None,
+    src_df: pd.DataFrame | None = None,
+    top_n: int = 500,
 ) -> tuple[pd.DataFrame, int]:
-    """
-    Computes missing PK tuples by pushing src_df via OPENJSON into SQL.
-    """
-    if not pk_cols:
-        raise ValueError("Target table has no PK (or PK not detected). MVP requires PK.")
+    # Allow either items or src_df
+    if items is None:
+        if src_df is None or src_df.empty:
+            return pd.DataFrame(), 0
+        # Only keep pk columns
+        missing = [c for c in pk_cols if c not in src_df.columns]
+        if missing:
+            raise ValueError(f"src_df missing PK columns: {missing}")
+        items = src_df[pk_cols].dropna().drop_duplicates().to_dict(orient="records")
 
-    # only keep pk cols that exist in src_df
-    missing_pk = [c for c in pk_cols if c not in src_df.columns]
-    if missing_pk:
-        raise ValueError(f"Missing PK columns in mapping: {', '.join(missing_pk)}")
+    if not items:
+        return pd.DataFrame(), 0
 
-    # payload: list of dicts for OPENJSON
-    items = src_df[pk_cols].dropna().drop_duplicates().to_dict(orient="records")
+    # ... then proceed with the OPENJSON-based SQL (the safe CTE pattern)
 
-    import json
+
     payload = json.dumps(items, ensure_ascii=False)
-
     tgt = qfqn(target_schema, target_table)
 
-    # OPENJSON WITH schema for pk cols
+    # OPENJSON schema: include ONLY pk_cols (nvarchar is fine for comparison)
     with_cols = ",\n        ".join(f"{c} nvarchar(4000) '$.{c}'" for c in pk_cols)
 
-    # normalize + join predicate across all PK cols
-    src_select = ", ".join(
+    # src projection
+    proj_cols = ",\n        ".join(
         f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.{qident(c)}))), N'') AS {qident(c)}"
         for c in pk_cols
     )
 
+    # predicates
     req_pred = " AND ".join(f"s.{qident(c)} IS NOT NULL" for c in pk_cols)
-
     join_pred = " AND ".join(
         f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{qident(c)}))), N'') = s.{qident(c)}"
         for c in pk_cols
@@ -190,7 +189,7 @@ def preview_missing_by_pk(
     sql_sample = f"""
 ;WITH src AS (
     SELECT DISTINCT
-        {src_select}
+        {proj_cols}
     FROM OPENJSON(?)
     WITH (
         {with_cols}
@@ -214,7 +213,7 @@ ORDER BY {order_by};
     sql_count = f"""
 ;WITH src AS (
     SELECT DISTINCT
-        {src_select}
+        {proj_cols}
     FROM OPENJSON(?)
     WITH (
         {with_cols}
@@ -239,11 +238,11 @@ FROM missing;
         df_sample = pd.DataFrame()
 
     df_count = db.read_sql(conn, sql_count, params=[payload])
-    total = 0
-    if df_count is not None and not df_count.empty:
-        total = int(df_count.iloc[0]["missing_total"])
+    missing_total = int(df_count.iloc[0]["missing_total"]) if (df_count is not None and not df_count.empty) else 0
 
-    return df_sample, total
+    return df_sample, missing_total
+
+
 
 def seed_missing_rows(
     conn,
