@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_confidential_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "CONFIDENTIAL_TYPE": "PUBLIC",
+      "LONG_NAME": "Public",
+      "SHORT_NAME": "PUBLIC",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Public record"
+    },
+    {
+      "CONFIDENTIAL_TYPE": "CONF",
+      "LONG_NAME": "Confidential",
+      "SHORT_NAME": "CONF",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Confidential"
+    },
+    {
+      "CONFIDENTIAL_TYPE": "PRIV",
+      "LONG_NAME": "Private",
+      "SHORT_NAME": "PRIV",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Private/internal"
+    }
+  ]
+}

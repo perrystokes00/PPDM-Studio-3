@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_coord_quality",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "COORDINATE_QUALITY": "SURVEY",
+      "LONG_NAME": "Surveyed",
+      "SHORT_NAME": "SURVEY",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Surveyed coordinates"
+    },
+    {
+      "COORDINATE_QUALITY": "EST",
+      "LONG_NAME": "Estimated",
+      "SHORT_NAME": "EST",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Estimated coordinates"
+    },
+    {
+      "COORDINATE_QUALITY": "UNK",
+      "LONG_NAME": "Unknown",
+      "SHORT_NAME": "UNK",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Unknown quality"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_uom_family",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "UOM_FAMILY": "LENGTH",
+      "LONG_NAME": "Length",
+      "SHORT_NAME": "LENGTH",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Length family"
+    },
+    {
+      "UOM_FAMILY": "TIME",
+      "LONG_NAME": "Time",
+      "SHORT_NAME": "TIME",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Time family"
+    },
+    {
+      "UOM_FAMILY": "PRESSURE",
+      "LONG_NAME": "Pressure",
+      "SHORT_NAME": "PRES",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Pressure family"
+    },
+    {
+      "UOM_FAMILY": "VOLUME",
+      "LONG_NAME": "Volume",
+      "SHORT_NAME": "VOL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Volume family"
+    }
+  ]
+}

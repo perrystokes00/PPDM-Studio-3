@@ -1,0 +1,50 @@
+{
+  "name": "dbo.r_well_status",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "STATUS_TYPE": "PERMIT",  "STATUS": "PERMITTED",     "LONG_NAME": "Permitted",             "SHORT_NAME": "PERMITTED", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Permit approved/active" },
+    { "STATUS_TYPE": "PERMIT",  "STATUS": "EXPIRED",       "LONG_NAME": "Permit Expired",        "SHORT_NAME": "EXPIRED",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Permit expired" },
+    { "STATUS_TYPE": "PERMIT",  "STATUS": "CANCELLED",     "LONG_NAME": "Permit Cancelled",      "SHORT_NAME": "CANCELLED", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Permit cancelled" },
+
+    { "STATUS_TYPE": "DRILL",   "STATUS": "SPUD",          "LONG_NAME": "Spud",                  "SHORT_NAME": "SPUD",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Spud date reached" },
+    { "STATUS_TYPE": "DRILL",   "STATUS": "DRILLING",      "LONG_NAME": "Drilling",              "SHORT_NAME": "DRILLING",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Actively drilling" },
+    { "STATUS_TYPE": "DRILL",   "STATUS": "SIDETRACK",     "LONG_NAME": "Sidetrack",             "SHORT_NAME": "SIDETRACK", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Sidetrack drilling" },
+    { "STATUS_TYPE": "DRILL",   "STATUS": "TD",            "LONG_NAME": "Total Depth Reached",   "SHORT_NAME": "TD",        "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "TD reached" },
+    { "STATUS_TYPE": "DRILL",   "STATUS": "DRILL_SUSP",    "LONG_NAME": "Drilling Suspended",    "SHORT_NAME": "DRILL_SUSP","ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Drilling suspended" },
+    { "STATUS_TYPE": "DRILL",   "STATUS": "DRILL_ABORTED", "LONG_NAME": "Drilling Aborted",      "SHORT_NAME": "DRILL_ABORTED","ACTIVE_IND":"Y","SOURCE":"SYNTH","REMARK":"Drilling abandoned/terminated" },
+
+    { "STATUS_TYPE": "COMP",    "STATUS": "COMPLETING",    "LONG_NAME": "Completing",            "SHORT_NAME": "COMPLETING","ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Completion operations active" },
+    { "STATUS_TYPE": "COMP",    "STATUS": "COMPLETED",     "LONG_NAME": "Completed",             "SHORT_NAME": "COMPLETED", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Completed" },
+    { "STATUS_TYPE": "COMP",    "STATUS": "RECOMPLETION",  "LONG_NAME": "Recompletion",          "SHORT_NAME": "RECOMP",    "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Recompletion operations" },
+    { "STATUS_TYPE": "COMP",    "STATUS": "WORKOVER",      "LONG_NAME": "Workover",              "SHORT_NAME": "WORKOVER",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Workover operations" },
+    { "STATUS_TYPE": "COMP",    "STATUS": "STIMULATED",    "LONG_NAME": "Stimulated",            "SHORT_NAME": "STIM",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Stimulation performed" },
+    { "STATUS_TYPE": "COMP",    "STATUS": "FRAC",          "LONG_NAME": "Hydraulic Fracturing",  "SHORT_NAME": "FRAC",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Hydraulic fracturing" },
+
+    { "STATUS_TYPE": "OPER",    "STATUS": "PRODUCING",     "LONG_NAME": "Producing",             "SHORT_NAME": "PROD",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Producing" },
+    { "STATUS_TYPE": "OPER",    "STATUS": "SHUT_IN",       "LONG_NAME": "Shut In",               "SHORT_NAME": "SHUTIN",    "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Temporarily shut in" },
+    { "STATUS_TYPE": "OPER",    "STATUS": "IDLE",          "LONG_NAME": "Idle",                  "SHORT_NAME": "IDLE",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Idle / not producing" },
+    { "STATUS_TYPE": "OPER",    "STATUS": "FLOWING",       "LONG_NAME": "Flowing",               "SHORT_NAME": "FLOW",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Flowing" },
+    { "STATUS_TYPE": "OPER",    "STATUS": "ART_LIFT",      "LONG_NAME": "Artificial Lift",       "SHORT_NAME": "ALIFT",     "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Artificial lift" },
+
+    { "STATUS_TYPE": "INJ",     "STATUS": "INJECTING",     "LONG_NAME": "Injecting",             "SHORT_NAME": "INJ",       "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Injecting" },
+    { "STATUS_TYPE": "INJ",     "STATUS": "DISPOSAL",      "LONG_NAME": "Disposal",              "SHORT_NAME": "DISP",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Disposal well" },
+    { "STATUS_TYPE": "INJ",     "STATUS": "INJ_SHUT_IN",   "LONG_NAME": "Injection Shut In",     "SHORT_NAME": "INJ_SI",    "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Injection shut in" },
+    { "STATUS_TYPE": "INJ",     "STATUS": "INJ_TEST",      "LONG_NAME": "Injection Test",        "SHORT_NAME": "INJTEST",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Injection test" },
+
+    { "STATUS_TYPE": "SUSP",    "STATUS": "SUSPENDED",     "LONG_NAME": "Suspended",             "SHORT_NAME": "SUSP",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Suspended" },
+    { "STATUS_TYPE": "SUSP",    "STATUS": "TEMP_ABAND",    "LONG_NAME": "Temporarily Abandoned", "SHORT_NAME": "TA",        "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Temporarily abandoned" },
+
+    { "STATUS_TYPE": "ABAND",   "STATUS": "PLUGGING",      "LONG_NAME": "Plugging",              "SHORT_NAME": "PLUG",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Plugging operations" },
+    { "STATUS_TYPE": "ABAND",   "STATUS": "PA",            "LONG_NAME": "Plugged and Abandoned", "SHORT_NAME": "PA",        "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Plugged & abandoned" },
+    { "STATUS_TYPE": "ABAND",   "STATUS": "ORPHAN",        "LONG_NAME": "Orphan",                "SHORT_NAME": "ORPH",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Orphan well" },
+    { "STATUS_TYPE": "ABAND",   "STATUS": "RECLAIMED",     "LONG_NAME": "Reclaimed",             "SHORT_NAME": "RECL",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Site reclaimed" },
+
+    { "STATUS_TYPE": "TEST",    "STATUS": "TESTING",       "LONG_NAME": "Testing",               "SHORT_NAME": "TEST",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Testing" },
+    { "STATUS_TYPE": "TEST",    "STATUS": "EVAL",          "LONG_NAME": "Evaluation",            "SHORT_NAME": "EVAL",      "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Evaluation" },
+    { "STATUS_TYPE": "TEST",    "STATUS": "DST",           "LONG_NAME": "Drill Stem Test",       "SHORT_NAME": "DST",       "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Drill stem test" },
+
+    { "STATUS_TYPE": "UNKNOWN", "STATUS": "UNKNOWN",       "LONG_NAME": "Unknown",               "SHORT_NAME": "UNKNOWN",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Unknown" },
+    { "STATUS_TYPE": "UNKNOWN", "STATUS": "LEGACY",        "LONG_NAME": "Legacy",                "SHORT_NAME": "LEGACY",    "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Legacy imported" }
+  ]
+}

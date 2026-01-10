@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_strat_name_set_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "STRAT_NAME_SET_TYPE": "LITHO",
+      "LONG_NAME": "Lithostratigraphic",
+      "SHORT_NAME": "LITHO",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Lithostratigraphy"
+    },
+    {
+      "STRAT_NAME_SET_TYPE": "CHRONO",
+      "LONG_NAME": "Chronostratigraphic",
+      "SHORT_NAME": "CHRONO",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Chronostratigraphy"
+    },
+    {
+      "STRAT_NAME_SET_TYPE": "BIO",
+      "LONG_NAME": "Biostratigraphic",
+      "SHORT_NAME": "BIO",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Biostratigraphy"
+    }
+  ]
+}

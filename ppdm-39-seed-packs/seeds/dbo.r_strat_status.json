@@ -1,0 +1,9 @@
+{
+  "name": "dbo.r_strat_status",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "STRAT_STATUS": "ACTIVE",  "LONG_NAME": "Active",  "SHORT_NAME": "ACTIVE",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Active strat unit" },
+    { "STRAT_STATUS": "INACTIVE","LONG_NAME": "Inactive","SHORT_NAME": "INACTIVE","ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Inactive strat unit" }
+  ]
+}

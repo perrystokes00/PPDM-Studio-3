@@ -1,0 +1,10 @@
+{
+  "name": "dbo.r_ppdm_row_quality",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "ROW_QUALITY_ID": "GOOD", "LONG_NAME": "Good", "SHORT_NAME": "GOOD", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Default row quality" },
+    { "ROW_QUALITY_ID": "OK",   "LONG_NAME": "OK",   "SHORT_NAME": "OK",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Acceptable row quality" },
+    { "ROW_QUALITY_ID": "BAD",  "LONG_NAME": "Bad",  "SHORT_NAME": "BAD",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Invalid/failed QC" }
+  ]
+}

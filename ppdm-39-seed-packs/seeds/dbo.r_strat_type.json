@@ -1,0 +1,9 @@
+{
+  "name": "dbo.r_strat_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "STRAT_TYPE": "LITHO", "LONG_NAME": "Lithostratigraphic", "SHORT_NAME": "LITHO", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Lithostrat type" },
+    { "STRAT_TYPE": "CHRON", "LONG_NAME": "Chronostratigraphic","SHORT_NAME": "CHRON", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Chronostrat type" }
+  ]
+}

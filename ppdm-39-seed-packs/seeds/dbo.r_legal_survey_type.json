@@ -1,0 +1,23 @@
+{
+  "name": "dbo.r_legal_survey_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "LEGAL_SURVEY_TYPE": "PLSS",
+      "LONG_NAME": "PLSS",
+      "SHORT_NAME": "PLSS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "PLSS"
+    },
+    {
+      "LEGAL_SURVEY_TYPE": "CONC",
+      "LONG_NAME": "Concession",
+      "SHORT_NAME": "CONC",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Concession/Block system"
+    }
+  ]
+}

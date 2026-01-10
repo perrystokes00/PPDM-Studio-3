@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_water_datum",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "WATER_DATUM": "MSL",
+      "LONG_NAME": "Mean Sea Level",
+      "SHORT_NAME": "MSL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Reference datum"
+    },
+    {
+      "WATER_DATUM": "LAT",
+      "LONG_NAME": "Lowest Astronomical Tide",
+      "SHORT_NAME": "LAT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Tidal datum"
+    },
+    {
+      "WATER_DATUM": "MLLW",
+      "LONG_NAME": "Mean Lower Low Water",
+      "SHORT_NAME": "MLLW",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Tidal datum"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_well_class",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "WELL_CLASS": "OIL",
+      "LONG_NAME": "Oil Well",
+      "SHORT_NAME": "OIL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Oil producing"
+    },
+    {
+      "WELL_CLASS": "GAS",
+      "LONG_NAME": "Gas Well",
+      "SHORT_NAME": "GAS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Gas producing"
+    },
+    {
+      "WELL_CLASS": "INJ",
+      "LONG_NAME": "Injection Well",
+      "SHORT_NAME": "INJ",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Injection"
+    },
+    {
+      "WELL_CLASS": "OBS",
+      "LONG_NAME": "Observation Well",
+      "SHORT_NAME": "OBS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Monitoring/observation"
+    }
+  ]
+}

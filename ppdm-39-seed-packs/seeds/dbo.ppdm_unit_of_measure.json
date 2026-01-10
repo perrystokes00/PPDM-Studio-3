@@ -1,0 +1,10 @@
+{
+  "name": "dbo.ppdm_unit_of_measure",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "UOM_ID": "FT", "ABBREVIATION": "ft", "SHORT_NAME": "FT", "LONG_NAME": "Foot", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Depth/length unit" },
+    { "UOM_ID": "M",  "ABBREVIATION": "m",  "SHORT_NAME": "M",  "LONG_NAME": "Meter", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Depth/length unit" },
+    { "UOM_ID": "IN", "ABBREVIATION": "in", "SHORT_NAME": "IN", "LONG_NAME": "Inch", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Length unit" }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_fluid_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "FLUID_TYPE": "OIL",
+      "LONG_NAME": "Oil",
+      "SHORT_NAME": "OIL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Oil"
+    },
+    {
+      "FLUID_TYPE": "GAS",
+      "LONG_NAME": "Gas",
+      "SHORT_NAME": "GAS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Gas"
+    },
+    {
+      "FLUID_TYPE": "WATER",
+      "LONG_NAME": "Water",
+      "SHORT_NAME": "WATER",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Water"
+    },
+    {
+      "FLUID_TYPE": "COND",
+      "LONG_NAME": "Condensate",
+      "SHORT_NAME": "COND",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Condensate"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_state_province",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "STATE_PROVINCE": "KS",
+      "LONG_NAME": "Kansas",
+      "SHORT_NAME": "KS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Kansas"
+    },
+    {
+      "STATE_PROVINCE": "OK",
+      "LONG_NAME": "Oklahoma",
+      "SHORT_NAME": "OK",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Oklahoma"
+    },
+    {
+      "STATE_PROVINCE": "TX",
+      "LONG_NAME": "Texas",
+      "SHORT_NAME": "TX",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Texas"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_location_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "LOCATION_TYPE": "PLSS",
+      "LONG_NAME": "Public Land Survey System",
+      "SHORT_NAME": "PLSS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "PLSS location"
+    },
+    {
+      "LOCATION_TYPE": "LATLON",
+      "LONG_NAME": "Latitude/Longitude",
+      "SHORT_NAME": "LATLON",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Geographic coordinates"
+    },
+    {
+      "LOCATION_TYPE": "M&B",
+      "LONG_NAME": "Metes and Bounds",
+      "SHORT_NAME": "M&B",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Metes and bounds description"
+    }
+  ]
+}

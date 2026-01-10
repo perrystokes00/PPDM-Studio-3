@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_well_profile_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "WELL_PROFILE_TYPE": "VERT",
+      "LONG_NAME": "Vertical",
+      "SHORT_NAME": "VERT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Vertical well"
+    },
+    {
+      "WELL_PROFILE_TYPE": "DEV",
+      "LONG_NAME": "Deviated",
+      "SHORT_NAME": "DEV",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Directional/deviated"
+    },
+    {
+      "WELL_PROFILE_TYPE": "HORIZ",
+      "LONG_NAME": "Horizontal",
+      "SHORT_NAME": "HORIZ",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Horizontal"
+    },
+    {
+      "WELL_PROFILE_TYPE": "MULTI",
+      "LONG_NAME": "Multilateral",
+      "SHORT_NAME": "MULTI",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Multilateral"
+    }
+  ]
+}

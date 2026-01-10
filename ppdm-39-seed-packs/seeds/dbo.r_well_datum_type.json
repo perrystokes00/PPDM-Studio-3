@@ -1,0 +1,47 @@
+{
+  "name": "dbo.r_well_datum_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "WELL_DATUM_TYPE": "KB",
+      "LONG_NAME": "Kelly Bushing",
+      "SHORT_NAME": "KB",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "KB elevation type"
+    },
+    {
+      "WELL_DATUM_TYPE": "DF",
+      "LONG_NAME": "Derrick Floor",
+      "SHORT_NAME": "DF",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Derrick floor elevation type"
+    },
+    {
+      "WELL_DATUM_TYPE": "RT",
+      "LONG_NAME": "Rotary Table",
+      "SHORT_NAME": "RT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Rotary table elevation type"
+    },
+    {
+      "WELL_DATUM_TYPE": "GL",
+      "LONG_NAME": "Ground Level",
+      "SHORT_NAME": "GL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Ground elevation type"
+    },
+    {
+      "WELL_DATUM_TYPE": "MSL",
+      "LONG_NAME": "Mean Sea Level",
+      "SHORT_NAME": "MSL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Sea level datum"
+    }
+  ]
+}

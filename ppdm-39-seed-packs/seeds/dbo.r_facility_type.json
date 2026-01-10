@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_facility_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "FACILITY_TYPE": "WELLHEAD",
+      "LONG_NAME": "Wellhead",
+      "SHORT_NAME": "WELLHEAD",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Wellhead facility"
+    },
+    {
+      "FACILITY_TYPE": "TANK",
+      "LONG_NAME": "Tank Battery",
+      "SHORT_NAME": "TANK",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Storage tank"
+    },
+    {
+      "FACILITY_TYPE": "PLANT",
+      "LONG_NAME": "Plant",
+      "SHORT_NAME": "PLANT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Processing plant"
+    },
+    {
+      "FACILITY_TYPE": "PIPE",
+      "LONG_NAME": "Pipeline",
+      "SHORT_NAME": "PIPE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Pipeline"
+    }
+  ]
+}

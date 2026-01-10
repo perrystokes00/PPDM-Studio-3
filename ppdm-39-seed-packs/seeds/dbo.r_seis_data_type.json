@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_seis_data_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "SEIS_DATA_TYPE": "SHOT",
+      "LONG_NAME": "Shot Records",
+      "SHORT_NAME": "SHOT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Field records"
+    },
+    {
+      "SEIS_DATA_TYPE": "STACK",
+      "LONG_NAME": "Stack",
+      "SHORT_NAME": "STACK",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Processed stack"
+    },
+    {
+      "SEIS_DATA_TYPE": "MIG",
+      "LONG_NAME": "Migration",
+      "SHORT_NAME": "MIG",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Migrated volume"
+    }
+  ]
+}

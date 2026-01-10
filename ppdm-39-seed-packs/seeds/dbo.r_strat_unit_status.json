@@ -1,0 +1,23 @@
+{
+  "name": "dbo.r_strat_unit_status",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "STRAT_UNIT_STATUS": "ACTIVE",
+      "LONG_NAME": "Active",
+      "SHORT_NAME": "ACTIVE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Active strat unit"
+    },
+    {
+      "STRAT_UNIT_STATUS": "DEPR",
+      "LONG_NAME": "Deprecated",
+      "SHORT_NAME": "DEPR",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Deprecated strat unit"
+    }
+  ]
+}

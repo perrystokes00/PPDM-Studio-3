@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_equip_component_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "EQUIPMENT_COMPONENT_TYPE": "PUMP",
+      "LONG_NAME": "Pump",
+      "SHORT_NAME": "PUMP",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Pump"
+    },
+    {
+      "EQUIPMENT_COMPONENT_TYPE": "VALVE",
+      "LONG_NAME": "Valve",
+      "SHORT_NAME": "VALVE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Valve"
+    },
+    {
+      "EQUIPMENT_COMPONENT_TYPE": "METER",
+      "LONG_NAME": "Meter",
+      "SHORT_NAME": "METER",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Meter"
+    }
+  ]
+}

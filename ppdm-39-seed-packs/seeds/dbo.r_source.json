@@ -1,0 +1,8 @@
+{
+  "name": "dbo.r_source",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "SOURCE": "SYNTH", "ACTIVE_IND": "Y", "REMARK": "Synthetic seed values (PPDM Loader Studio)" }
+  ]
+}

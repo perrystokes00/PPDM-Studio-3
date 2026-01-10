@@ -1,0 +1,451 @@
+{
+  "ppdm_version": "3.9",
+  "generated_at": "2026-01-09T18:33:24",
+  "seed_pack_root": "C:\\Users\\perry\\OneDrive\\Documents\\PPDM_Studio_3\\ppdm-39-seed-packs",
+  "defaults": {
+    "schema": "dbo",
+    "mode": "missing_only",
+    "format": "json",
+    "on_missing_table": "skip",
+    "on_pk_missing": "error",
+    "ppdm_guid": {
+      "strategy": "newid_if_missing"
+    },
+    "audit": {
+      "row_created_by": "loaded_by",
+      "row_changed_by": "loaded_by"
+    }
+  },
+  "seeds": [
+    {
+      "table": "dbo.ppdm_unit_of_measure",
+      "file": "seeds/dbo.ppdm_unit_of_measure.json",
+      "format": "json",
+      "keys": [
+        "UOM_ID"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_confidential_type",
+      "file": "seeds/dbo.r_confidential_type.json",
+      "format": "json",
+      "keys": [
+        "CONFIDENTIAL_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_coord_quality",
+      "file": "seeds/dbo.r_coord_quality.json",
+      "format": "json",
+      "keys": [
+        "COORDINATE_QUALITY"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_curve_type",
+      "file": "seeds/dbo.r_curve_type.json",
+      "format": "json",
+      "keys": [
+        "CURVE_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_dir_srvy_type",
+      "file": "seeds/dbo.r_dir_srvy_type.json",
+      "format": "json",
+      "keys": [
+        "SURVEY_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_environment",
+      "file": "seeds/dbo.r_environment.json",
+      "format": "json",
+      "keys": [
+        "ENVIRONMENT_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_equip_component_type",
+      "file": "seeds/dbo.r_equip_component_type.json",
+      "format": "json",
+      "keys": [
+        "EQUIPMENT_COMPONENT_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_facility_type",
+      "file": "seeds/dbo.r_facility_type.json",
+      "format": "json",
+      "keys": [
+        "FACILITY_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_fluid_type",
+      "file": "seeds/dbo.r_fluid_type.json",
+      "format": "json",
+      "keys": [
+        "FLUID_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_legal_survey_type",
+      "file": "seeds/dbo.r_legal_survey_type.json",
+      "format": "json",
+      "keys": [
+        "LEGAL_SURVEY_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 2,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_location_quality",
+      "file": "seeds/dbo.r_location_quality.json",
+      "format": "json",
+      "keys": [
+        "LOCATION_QUALITY"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_location_type",
+      "file": "seeds/dbo.r_location_type.json",
+      "format": "json",
+      "keys": [
+        "LOCATION_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_pick_quality",
+      "file": "seeds/dbo.r_pick_quality.json",
+      "format": "json",
+      "keys": [
+        "PICK_QUALITY"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_plot_symbol",
+      "file": "seeds/dbo.r_plot_symbol.json",
+      "format": "json",
+      "keys": [
+        "PLOT_SYMBOL"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_ppdm_row_quality",
+      "file": "seeds/dbo.r_ppdm_row_quality.json",
+      "format": "json",
+      "keys": [
+        "ROW_QUALITY_ID"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_seis_dimension",
+      "file": "seeds/dbo.r_seis_dimension.json",
+      "format": "json",
+      "keys": [
+        "SEIS_DIMENSION"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 2,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_source",
+      "file": "seeds/dbo.r_source.json",
+      "format": "json",
+      "keys": [
+        "SOURCE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 1,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_strat_name_set_type",
+      "file": "seeds/dbo.r_strat_name_set_type.json",
+      "format": "json",
+      "keys": [
+        "STRAT_NAME_SET_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_strat_status",
+      "file": "seeds/dbo.r_strat_status.json",
+      "format": "json",
+      "keys": [
+        "STRAT_STATUS"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 2,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_strat_type",
+      "file": "seeds/dbo.r_strat_type.json",
+      "format": "json",
+      "keys": [
+        "STRAT_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 2,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_strat_unit_type",
+      "file": "seeds/dbo.r_strat_unit_type.json",
+      "format": "json",
+      "keys": [
+        "STRAT_TYPE",
+        "STRAT_UNIT_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_water_datum",
+      "file": "seeds/dbo.r_water_datum.json",
+      "format": "json",
+      "keys": [
+        "WATER_DATUM"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 3,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_class",
+      "file": "seeds/dbo.r_well_class.json",
+      "format": "json",
+      "keys": [
+        "WELL_CLASS"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_datum_type",
+      "file": "seeds/dbo.r_well_datum_type.json",
+      "format": "json",
+      "keys": [
+        "WELL_DATUM_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 5,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_level_type",
+      "file": "seeds/dbo.r_well_level_type.json",
+      "format": "json",
+      "keys": [
+        "WELL_LEVEL_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_profile_type",
+      "file": "seeds/dbo.r_well_profile_type.json",
+      "format": "json",
+      "keys": [
+        "WELL_PROFILE_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 4,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_status",
+      "file": "seeds/dbo.r_well_status.json",
+      "format": "json",
+      "keys": [
+        "STATUS_TYPE",
+        "STATUS"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 35,
+      "message": ""
+    },
+    {
+      "table": "dbo.r_well_status_type",
+      "file": "seeds/dbo.r_well_status_type.json",
+      "format": "json",
+      "keys": [
+        "STATUS_TYPE"
+      ],
+      "mode": "missing_only",
+      "on_missing_table": "skip",
+      "on_pk_missing": "error",
+      "table_found": true,
+      "pk_found": true,
+      "rows_count": 9,
+      "message": ""
+    }
+  ],
+  "summary": {
+    "seed_files_found": 35,
+    "catalog_entries": 35,
+    "tables_found": 28,
+    "tables_missing": 7,
+    "pk_missing": 0,
+    "parse_errors": 0
+  }
+}

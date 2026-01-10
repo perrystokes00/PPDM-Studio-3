@@ -1,0 +1,23 @@
+{
+  "name": "dbo.r_seis_dimension",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "SEIS_DIMENSION": "TIME",
+      "LONG_NAME": "Time",
+      "SHORT_NAME": "TIME",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Time domain"
+    },
+    {
+      "SEIS_DIMENSION": "DEPTH",
+      "LONG_NAME": "Depth",
+      "SHORT_NAME": "DEPTH",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Depth domain"
+    }
+  ]
+}

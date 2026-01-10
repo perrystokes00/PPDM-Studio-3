@@ -242,8 +242,6 @@ FROM missing;
 
     return df_sample, missing_total
 
-
-
 def seed_missing_rows(
     conn,
     *,
@@ -256,6 +254,8 @@ def seed_missing_rows(
     """
     Insert missing PK tuples + selected non-PK mapped columns.
     Auto-populates PPDM_GUID + audit columns if present on target table and not provided.
+
+    Returns an accurate inserted row count (does NOT rely on cursor.rowcount).
     """
     if insert_df is None or insert_df.empty:
         return 0
@@ -283,6 +283,7 @@ def seed_missing_rows(
     who = (loaded_by or "").replace("'", "''")
 
     default_cols: list[str] = []
+
     def _add_default(col: str) -> None:
         if col.upper() in tgt_cols and col.upper() not in user_cols_u:
             default_cols.append(col)
@@ -301,14 +302,11 @@ def seed_missing_rows(
     default_u = {c.upper() for c in default_cols}
     json_cols = [c for c in user_cols if c.upper() not in default_u]  # user_cols only
 
+    if not json_cols:
+        raise ValueError("No JSON columns available to seed. Map at least the PK columns from the source.")
+
     # OPENJSON schema only for json_cols
     with_cols = ",\n        ".join(f"{c} nvarchar(4000) '$.{c}'" for c in json_cols)
-
-    # src projection comes only from OPENJSON columns
-    src_select = ",\n        ".join(
-        f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), j.{qident(c)}))), N'') AS {qident(c)}"
-        for c in json_cols
-    )
 
     # INSERT select expressions (defaults injected here)
     sel_exprs: list[str] = []
@@ -323,7 +321,7 @@ def seed_missing_rows(
         else:
             sel_exprs.append(f"s.{qident(c)}")
 
-    # join predicate for PK tuple (PK cols must be in src/json_cols or user_cols)
+    # join predicate for PK tuple
     join_pred = " AND ".join(
         f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), t.{qident(c)}))), N'') = s.{qident(c)}"
         for c in pk_cols
@@ -333,11 +331,10 @@ def seed_missing_rows(
     col_list = ", ".join(qident(c) for c in insert_cols)
     sel_list = ", ".join(sel_exprs)
 
-    # Handle pathological case: user provided only defaults (shouldn't happen, but be safe)
-    if not json_cols:
-        raise ValueError("No JSON columns available to seed. Map at least the PK columns from the source.")
-
+    # IMPORTANT: return inserted rowcount explicitly
     sql = f"""
+SET NOCOUNT ON;
+
 ;WITH src AS (
     SELECT DISTINCT
         {", ".join([qident(c) for c in json_cols])}
@@ -359,11 +356,21 @@ missing AS (
 INSERT INTO {tgt} ({col_list})
 SELECT {sel_list}
 FROM missing s;
+
+SELECT CAST(@@ROWCOUNT AS int) AS inserted_rows;
 """.strip()
 
     cur = conn.cursor()
     cur.execute(sql, (payload,))
-    inserted = cur.rowcount if cur.rowcount is not None else 0
+
+    # Fetch the explicit count (reliable even when pyodbc rowcount = -1)
+    row = cur.fetchone()
+    inserted = int(row[0]) if row and row[0] is not None else 0
+
     conn.commit()
-    return int(inserted)
+    return inserted
+
+
+
+
 

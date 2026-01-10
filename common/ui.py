@@ -6,6 +6,7 @@ import json
 import streamlit as st
 
 import ppdm_loader.db as db
+from ppdm_loader.seed_ui import render_seed_sidebar
 
 CATALOG_DIR = Path(r"C:\Users\perry\OneDrive\Documents\PPDM_Studio_3\schema_registry")
 
@@ -61,6 +62,21 @@ def sidebar_connect(*, page_prefix: str = "") -> None:
     ss.setdefault("ppdm_domain", "WELL")
     ss.setdefault("catalog_file_selectbox", "(none)")
     ss.setdefault("catalog_json", None)
+
+    # ========== SEED FROM CATALOG (GLOBAL TOOL) ==========
+    st.divider()
+    st.subheader("Reference seeding")
+
+    conn = ss.get("conn")
+    if conn is None:
+        st.caption("Connect to enable seeding.")
+    else:
+        # Map your UI PPDM version label -> seed flavor key
+        ppdm_flavor = "ppdm39"
+        if ss.get("ppdm_version", "").lower().startswith("ppdm lite"):
+            ppdm_flavor = "ppdm_lite"
+
+        render_seed_sidebar(conn, ppdm_flavor=ppdm_flavor)
 
     # ---------- UI ----------
     with st.sidebar:

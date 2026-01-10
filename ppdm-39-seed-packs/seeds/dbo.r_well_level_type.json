@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_well_level_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "WELL_LEVEL_TYPE": "SURFACE",
+      "LONG_NAME": "Surface",
+      "SHORT_NAME": "SURFACE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Surface reference"
+    },
+    {
+      "WELL_LEVEL_TYPE": "KB",
+      "LONG_NAME": "Kelly Bushing",
+      "SHORT_NAME": "KB",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "KB reference"
+    },
+    {
+      "WELL_LEVEL_TYPE": "DF",
+      "LONG_NAME": "Derrick Floor",
+      "SHORT_NAME": "DF",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "DF reference"
+    },
+    {
+      "WELL_LEVEL_TYPE": "RT",
+      "LONG_NAME": "Rotary Table",
+      "SHORT_NAME": "RT",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "RT reference"
+    }
+  ]
+}

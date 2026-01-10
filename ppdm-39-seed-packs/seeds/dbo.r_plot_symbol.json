@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_plot_symbol",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "PLOT_SYMBOL": "WELL",
+      "LONG_NAME": "Well",
+      "SHORT_NAME": "WELL",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Well symbol"
+    },
+    {
+      "PLOT_SYMBOL": "BH",
+      "LONG_NAME": "Bottomhole",
+      "SHORT_NAME": "BH",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Bottomhole symbol"
+    },
+    {
+      "PLOT_SYMBOL": "SURF",
+      "LONG_NAME": "Surface",
+      "SHORT_NAME": "SURF",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Surface symbol"
+    }
+  ]
+}

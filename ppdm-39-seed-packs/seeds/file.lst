@@ -1,0 +1,55 @@
+
+    Directory: C:\Users\perry\OneDrive\Documents\PPDM_Studio_3\ppdm-seed-packs\seeds
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---         04-Jan-2026    21:28            571 dbo.ppdm_unit_of_measure.json
+-a---         08-Jan-2026    19:06            810 dbo.r_dir_srvy_type.json
+-a---         04-Jan-2026    21:27            551 dbo.r_ppdm_row_quality.json
+-a---         04-Jan-2026    21:23            196 dbo.r_source.json
+-a---         04-Jan-2026    21:29            409 dbo.r_strat_status.json
+-a---         04-Jan-2026    21:31            412 dbo.r_strat_type.json
+-a---         08-Jan-2026    19:12           1615 dbo.r_well_status_type.json
+-a---         08-Jan-2026    19:21           7296 dbo.r_well_status.json
+-a---         09-Jan-2026     1:56            657 r_alloc_method.json
+-a---         09-Jan-2026     1:56            670 r_confidential_type.json
+-a---         09-Jan-2026     1:56            684 r_coordinate_quality.json
+-a---         09-Jan-2026     1:56            605 r_country.json
+-a---         09-Jan-2026     1:56            473 r_county.json
+-a---         09-Jan-2026     1:56            633 r_curve_class.json
+-a---         09-Jan-2026     1:56            891 r_dir_srvy_type.json
+-a---         09-Jan-2026     1:56            668 r_environment.json
+-a---         09-Jan-2026     1:56            620 r_equipment_type.json
+-a---         09-Jan-2026     1:56            844 r_facility_type.json
+-a---         09-Jan-2026     1:56            773 r_fluid_type.json
+-a---         09-Jan-2026     1:56            473 r_legal_survey_type.json
+-a---         09-Jan-2026     1:56            651 r_location_quality.json
+-a---         09-Jan-2026     1:56            708 r_location_type.json
+-a---         09-Jan-2026     1:56            815 r_log_run_status.json
+-a---         09-Jan-2026     1:56            797 r_log_type.json
+-a---         09-Jan-2026     1:56            822 r_pick_method.json
+-a---         09-Jan-2026     1:56            621 r_pick_quality.json
+-a---         09-Jan-2026     1:56            635 r_plot_symbol.json
+-a---         09-Jan-2026     1:56            646 r_ppdm_row_quality.json
+-a---         09-Jan-2026     1:56            629 r_prod_period_type.json
+-a---         09-Jan-2026     1:56            638 r_prod_status.json
+-a---         09-Jan-2026     1:56            657 r_seis_data_type.json
+-a---         09-Jan-2026     1:56            457 r_seis_dimension.json
+-a---         09-Jan-2026     1:56            713 r_seis_processing_type.json
+-a---         09-Jan-2026     1:56            633 r_seis_set_type.json
+-a---         09-Jan-2026     1:56            576 r_source.json
+-a---         09-Jan-2026     1:56            486 r_srvy_type.json
+-a---         09-Jan-2026     1:56            614 r_state_province.json
+-a---         09-Jan-2026     1:56            715 r_strat_name_set_type.json
+-a---         09-Jan-2026     1:56            490 r_strat_unit_status.json
+-a---         09-Jan-2026     1:56            798 r_strat_unit_type.json
+-a---         09-Jan-2026     1:56            604 r_tool_type.json
+-a---         09-Jan-2026     1:56            818 r_uom_family.json
+-a---         09-Jan-2026     1:56            667 r_water_datum.json
+-a---         09-Jan-2026     1:56            828 r_well_class.json
+-a---         09-Jan-2026     1:56           1078 r_well_datum_type.json
+-a---         09-Jan-2026     1:56            850 r_well_level_type.json
+-a---         09-Jan-2026     1:56            863 r_well_profile_type.json
+-a---         05-Jan-2026     3:15           1291 r_well_status_type.json
+-a---         08-Jan-2026    18:59           1003 r_well_status.json
+

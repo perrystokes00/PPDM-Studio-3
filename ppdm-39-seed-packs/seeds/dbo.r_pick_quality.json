@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_pick_quality",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "PICK_QUALITY": "A",
+      "LONG_NAME": "High",
+      "SHORT_NAME": "A",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "High confidence"
+    },
+    {
+      "PICK_QUALITY": "B",
+      "LONG_NAME": "Medium",
+      "SHORT_NAME": "B",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Medium confidence"
+    },
+    {
+      "PICK_QUALITY": "C",
+      "LONG_NAME": "Low",
+      "SHORT_NAME": "C",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Low confidence"
+    }
+  ]
+}

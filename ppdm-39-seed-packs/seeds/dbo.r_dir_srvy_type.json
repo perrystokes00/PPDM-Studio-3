@@ -1,0 +1,11 @@
+{
+  "name": "dbo.r_dir_srvy_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "SURVEY_TYPE": "MWD",        "LONG_NAME": "Measurement While Drilling", "SHORT_NAME": "MWD",        "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "MWD directional survey" },
+    { "SURVEY_TYPE": "GYRO",       "LONG_NAME": "Gyroscopic Survey",          "SHORT_NAME": "GYRO",       "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Gyro survey" },
+    { "SURVEY_TYPE": "MAG",        "LONG_NAME": "Magnetic Survey",            "SHORT_NAME": "MAG",        "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Magnetic survey" },
+    { "SURVEY_TYPE": "SINGLESHOT", "LONG_NAME": "Single Shot",                "SHORT_NAME": "SINGLESHOT", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Single shot survey" }
+  ]
+}

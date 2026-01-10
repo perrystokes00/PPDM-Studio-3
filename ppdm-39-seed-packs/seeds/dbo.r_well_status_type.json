@@ -1,0 +1,16 @@
+{
+  "name": "dbo.r_well_status_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    { "STATUS_TYPE": "PERMIT", "LONG_NAME": "Permitting", "SHORT_NAME": "PERMIT", "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Permit lifecycle statuses" },
+    { "STATUS_TYPE": "DRILL",  "LONG_NAME": "Drilling",   "SHORT_NAME": "DRILL",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Drilling lifecycle statuses" },
+    { "STATUS_TYPE": "COMP",   "LONG_NAME": "Completion", "SHORT_NAME": "COMP",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Completion/workover/stimulation statuses" },
+    { "STATUS_TYPE": "OPER",   "LONG_NAME": "Operating",  "SHORT_NAME": "OPER",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Producing/operating statuses" },
+    { "STATUS_TYPE": "INJ",    "LONG_NAME": "Injection",  "SHORT_NAME": "INJ",    "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Injection/disposal statuses" },
+    { "STATUS_TYPE": "SUSP",   "LONG_NAME": "Suspended",  "SHORT_NAME": "SUSP",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Suspended/temporarily abandoned statuses" },
+    { "STATUS_TYPE": "ABAND",  "LONG_NAME": "Abandoned",  "SHORT_NAME": "ABAND",  "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Plugging/abandonment/site closure statuses" },
+    { "STATUS_TYPE": "TEST",   "LONG_NAME": "Testing",    "SHORT_NAME": "TEST",   "ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Testing/evaluation statuses" },
+    { "STATUS_TYPE": "UNKNOWN","LONG_NAME": "Unknown",    "SHORT_NAME": "UNKNOWN","ACTIVE_IND": "Y", "SOURCE": "SYNTH", "REMARK": "Unknown/legacy statuses" }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "name": "dbo.r_strat_unit_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "STRAT_TYPE": "CHRON",
+      "STRAT_UNIT_TYPE": "FM",
+      "LONG_NAME": "Formation",
+      "SHORT_NAME": "FM",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Formation"
+    },
+    {
+      "STRAT_TYPE": "CHRON",
+      "STRAT_UNIT_TYPE": "MBR",
+      "LONG_NAME": "Member",
+      "SHORT_NAME": "MBR",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Member"
+    },
+    {
+      "STRAT_TYPE": "CHRON",
+      "STRAT_UNIT_TYPE": "GRP",
+      "LONG_NAME": "Group",
+      "SHORT_NAME": "GRP",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Group"
+    },
+    {
+      "STRAT_TYPE": "CHRON",
+      "STRAT_UNIT_TYPE": "ZONE",
+      "LONG_NAME": "Zone",
+      "SHORT_NAME": "ZONE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Zone"
+    }
+  ]
+}

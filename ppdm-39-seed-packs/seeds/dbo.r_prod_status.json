@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_prod_status",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "PROD_STATUS": "TEST",
+      "LONG_NAME": "Test",
+      "SHORT_NAME": "TEST",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Test production"
+    },
+    {
+      "PROD_STATUS": "ON",
+      "LONG_NAME": "On Production",
+      "SHORT_NAME": "ON",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Producing"
+    },
+    {
+      "PROD_STATUS": "OFF",
+      "LONG_NAME": "Off Production",
+      "SHORT_NAME": "OFF",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Not producing"
+    }
+  ]
+}

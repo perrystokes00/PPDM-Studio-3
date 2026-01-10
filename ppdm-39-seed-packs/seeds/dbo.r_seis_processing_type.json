@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_seis_processing_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "SEIS_PROCESSING_TYPE": "PRESTACK",
+      "LONG_NAME": "Pre-stack",
+      "SHORT_NAME": "PRE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Pre-stack processing"
+    },
+    {
+      "SEIS_PROCESSING_TYPE": "POSTSTACK",
+      "LONG_NAME": "Post-stack",
+      "SHORT_NAME": "POST",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Post-stack processing"
+    },
+    {
+      "SEIS_PROCESSING_TYPE": "MIGRATION",
+      "LONG_NAME": "Migration",
+      "SHORT_NAME": "MIG",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Migration processing"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "dbo.r_curve_type",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "CURVE_TYPE": "GR",
+      "LONG_NAME": "Gamma Ray",
+      "SHORT_NAME": "GR",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Gamma ray log"
+    },
+    {
+      "CURVE_TYPE": "RES",
+      "LONG_NAME": "Resistivity",
+      "SHORT_NAME": "RES",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Resistivity log"
+    },
+    {
+      "CURVE_TYPE": "DEN",
+      "LONG_NAME": "Density",
+      "SHORT_NAME": "DEN",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Density log"
+    },
+    {
+      "CURVE_TYPE": "NEU",
+      "LONG_NAME": "Neutron",
+      "SHORT_NAME": "NEU",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Neutron log"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_environment",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "ENVIRONMENT_TYPE": "ONSHORE",
+      "LONG_NAME": "Onshore",
+      "SHORT_NAME": "ONSHORE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Land"
+    },
+    {
+      "ENVIRONMENT_TYPE": "OFFSHORE",
+      "LONG_NAME": "Offshore",
+      "SHORT_NAME": "OFFSHORE",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Marine"
+    },
+    {
+      "ENVIRONMENT_TYPE": "TRANSITION",
+      "LONG_NAME": "Transition",
+      "SHORT_NAME": "TRANS",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Near shore/transition"
+    }
+  ]
+}

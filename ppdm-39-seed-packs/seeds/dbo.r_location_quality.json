@@ -1,0 +1,31 @@
+{
+  "name": "dbo.r_location_quality",
+  "model": "ppdm39",
+  "version": "1.0",
+  "rows": [
+    {
+      "LOCATION_QUALITY": "HIGH",
+      "LONG_NAME": "High",
+      "SHORT_NAME": "HIGH",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "High confidence"
+    },
+    {
+      "LOCATION_QUALITY": "MED",
+      "LONG_NAME": "Medium",
+      "SHORT_NAME": "MED",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Medium confidence"
+    },
+    {
+      "LOCATION_QUALITY": "LOW",
+      "LONG_NAME": "Low",
+      "SHORT_NAME": "LOW",
+      "ACTIVE_IND": "Y",
+      "SOURCE": "SYNTH",
+      "REMARK": "Low confidence"
+    }
+  ]
+}
