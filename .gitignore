@@ -1,1 +1,3 @@
 ppdm-39-seed-packs/
+__pycache__/
+*.pyc
