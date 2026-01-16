@@ -18,6 +18,16 @@ from ppdm_loader.fk_suggest import suggest_fk_candidates_step4
 
 from common.ui import sidebar_connect, require_connection
 from ppdm_loader.child_insert import fetch_fk_map, fetch_pk_columns, build_insert_new_sql_generic
+from ppdm_loader.fk_introspect import introspect_all_fks_for_child_table
+
+from ppdm_loader.station_promote import (
+    fetch_station_signature,
+    plan_station_mode,
+    build_station_seq_sql,
+    fetch_station_signature, 
+    plan_station_mode,
+    station_seq_expr_sql,
+)
 
 # ============================================================
 # Page setup (MULTIPAGE)
@@ -1492,12 +1502,8 @@ DERIVED_PK_REGISTRY = {
     },
     "dbo.well_dir_srvy_station": {
         "derived": {
-            "DEPTH_OBS_NO": {
-                "len": 20,
-                "inputs": ["UWI", "SURVEY_ID", "SOURCE", "STATION_ID", "STATION_MD"],
-            }
         }
-    },
+    }
 }
 
 # -----------------------------
@@ -1529,7 +1535,8 @@ if not norm_view_fqn:
 nv_schema, nv_name = _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
 norm_view = f"[{nv_schema}].[{nv_name}]"   # ✅ now Promote can use norm_view
 
-
+promote_mode_key = f"promote_mode__{tgt_schema}.{tgt_table}".lower()
+promote_update_key = f"promote_update_style__{tgt_schema}.{tgt_table}".lower()
 promote_mode = st.radio(
     "Promote mode",
     ["Insert new only", "Merge/Update existing"],
@@ -1935,27 +1942,620 @@ WHEN NOT MATCHED BY TARGET THEN
     VALUES ({", ".join([_insert_value_expr(c) for c in final_cols])});
 """.strip()
 
-# -----------------------------
-# Promote SQL must exist before Buttons render
-# -----------------------------
-sql_count_insert = locals().get("sql_count_insert", None)
-sql_insert = locals().get("sql_insert", None)
-sql_preview_merge = locals().get("sql_preview_merge", None)
-sql_merge = locals().get("sql_merge", None)
 
-# If we don't have the SQL yet, don't render the promote buttons/expanders.
-# This prevents NameError during partial code paths.
-if promote_mode == "Insert new only":
-    if not sql_count_insert or not sql_insert:
-        st.warning("Promote SQL not ready yet (insert-only). Build SQL above this section first.")
-        st.stop()
+def fetch_station_signature(conn, schema: str, table: str):
+    """
+    Returns (parent_schema, parent_table, parent_keys, seq_col) if target looks like a station table:
+      PK = (FK cols to one parent) + (one extra col)
+    Else returns None.
+    """
+    pk_cols = fetch_pk_columns(conn, schema=schema, table=table) or []
+    if not pk_cols:
+        return None
+
+    fk_rows = introspect_all_fks_for_child_table(conn, child_schema=schema, child_table=table)
+
+    if fk_rows is None:
+        return None
+
+    # If DataFrame, convert to list[dict]
+    if hasattr(fk_rows, "to_dict"):
+        if fk_rows.empty:
+            return None
+        fk_rows = fk_rows.to_dict(orient="records")
+
+    if not fk_rows:
+        return None
+
+    if fk_rows is None:
+        return None
+
+    # If DataFrame, convert to list[dict]
+    if hasattr(fk_rows, "to_dict"):
+        fk_rows = fk_rows.to_dict(orient="records")
+
+    if not fk_rows:
+        return None
+
+    fks = {}
+    for r in fk_rows:
+        fk_name = r.get("fk_name") or r.get("FK_NAME") or r.get("constraint_name") or r.get("CONSTRAINT_NAME")
+        if not fk_name:
+            continue
+
+        parent_schema = r.get("parent_schema") or r.get("PARENT_SCHEMA") or r.get("fk_table_schema") or r.get("PARENT_TABLE_SCHEMA")
+        parent_table  = r.get("parent_table")  or r.get("PARENT_TABLE")  or r.get("fk_table_name")   or r.get("PARENT_TABLE_NAME")
+        child_col     = r.get("child_col")     or r.get("CHILD_COL")     or r.get("fk_column_name")  or r.get("COLUMN_NAME")
+
+        if not child_col or not parent_table:
+            continue
+
+        d = fks.setdefault(fk_name, {
+            "parent_schema": parent_schema or "dbo",
+            "parent_table":  parent_table,
+            "child_cols": [],
+        })
+        d["child_cols"].append(child_col)
+
+    pk_set = {c.upper() for c in pk_cols}
+
+    for info in fks.values():
+        child_cols = info["child_cols"]
+        if not child_cols:
+            continue
+
+        fk_set = {c.upper() for c in child_cols}
+        if not fk_set.issubset(pk_set):
+            continue
+
+        extras = [c for c in pk_cols if c.upper() not in fk_set]
+        if len(extras) != 1:
+            continue
+
+        return (info["parent_schema"], info["parent_table"], child_cols, extras[0])
+
+    return None
+
+def choose_station_order_cols(view_cols: list[str]) -> list[str]:
+    prefer = ["STATION_MD", "MD", "MEASURED_DEPTH", "DEPTH", "TVD", "STATION_TVD", "STATION_TVDSS", "RID"]
+    view_u = {c.upper(): c for c in view_cols}
+    chosen = [view_u[p] for p in prefer if p in view_u]
+    return chosen or []
+    
+station_mode = locals().get("station_mode", False)
+station_seq_col = locals().get("station_seq_col", None)
+st.caption(f"Station mode: {'ON' if station_mode else 'OFF'} (seq col: {station_seq_col or '(none)'})")
+
+# ============================================================
+# PROMOTE (Insert-only + Merge) with:
+#   ✅ composite PK safe
+#   ✅ hash-derived PK support (DERIVED_PK_REGISTRY)
+#   ✅ generic PPDM "station-table" sequencing support (ROW_NUMBER)
+#      - detects PK = (FK parent keys) + (1 seq col)
+#      - generates seq col in a CTE ("src")
+#      - gates on parent existence to avoid FK failures
+# ============================================================
+
+# -----------------------------
+# Promote mode
+# -----------------------------
+norm_view_fqn = (
+    st.session_state.get("norm_view_fqn")
+    or st.session_state.get("norm_view_name")
+    or ""
+).strip()
+
+if not norm_view_fqn:
+    st.error("No normalized view found. Build the NORM view in Step 5 first.")
+    st.stop()
+
+nv_schema, nv_name = _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
+norm_view = f"[{nv_schema}].[{nv_name}]"
+promote_mode_key = f"promote_mode__{tgt_schema}.{tgt_table}".lower()
+promote_update_key = f"promote_update_style__{tgt_schema}.{tgt_table}".lower()
+
+promote_mode = st.radio(
+    "Promote mode",
+    ["Insert new only", "Merge/Update existing"],
+    index=0,
+    horizontal=True,
+    key=promote_mode_key,
+)
+
+update_style = "Fill-only"
+if promote_mode == "Merge/Update existing":
+    update_style = st.radio(
+        "Update style",
+        ["Fill-only", "Overwrite"],
+        index=0,
+        horizontal=True,
+        help="Fill-only updates target only when target is blank. Overwrite updates target when source has a value.",
+        key=promote_update_key,
+    )
+
+
+# -----------------------------
+# Read columns
+# -----------------------------
+try:
+    view_cols = db.read_sql(conn, f"SELECT TOP (0) * FROM {norm_view};").columns.tolist()
+    tgt_cols  = db.read_sql(conn, f"SELECT TOP (0) * FROM {target_full};").columns.tolist()
+except Exception as e:
+    st.error(f"Could not read columns for promote: {e}")
+    st.stop()
+
+view_cols_u = {c.upper(): c for c in view_cols}
+tgt_cols_u  = {c.upper(): c for c in tgt_cols}
+
+insertable_from_view = [c for c in view_cols if c.upper() in tgt_cols_u]
+
+st.caption(f"Columns available from NORM view → target: {len(insertable_from_view)}")
+with st.expander("Intersection columns", expanded=False):
+    st.code(", ".join(insertable_from_view) if insertable_from_view else "(none)")
+
+# -----------------------------
+# PK columns (composite-safe)
+# -----------------------------
+pk_cols = fetch_pk_columns(conn, schema=tgt_schema, table=tgt_table) or []
+if not pk_cols:
+    st.error("Could not detect PK columns for target. Step 7 requires a PK for safe promote.")
+    st.stop()
+
+st.caption(f"Target PK: {', '.join(pk_cols)}")
+
+# -----------------------------
+# Audit + GUID defaults
+# -----------------------------
+LOADED_BY = "Perry M Stokes"
+who = (LOADED_BY or "").replace("'", "''")
+
+AUDIT_DEFAULTS_INSERT = {
+    "ROW_CREATED_BY":     lambda: f"N'{who}'",
+    "ROW_CHANGED_BY":     lambda: f"N'{who}'",
+    "ROW_CREATED_DATE":   lambda: "SYSUTCDATETIME()",
+    "ROW_CHANGED_DATE":   lambda: "SYSUTCDATETIME()",
+    "ROW_EFFECTIVE_DATE": lambda: "SYSUTCDATETIME()",
+}
+AUDIT_DEFAULTS_UPDATE = {
+    "ROW_CHANGED_BY":   lambda: f"N'{who}'",
+    "ROW_CHANGED_DATE": lambda: "SYSUTCDATETIME()",
+}
+
+# -----------------------------
+# Helper: derived-hash expressions (existing)
+# -----------------------------
+def _sql_trim(alias: str, col: str) -> str:
+    return f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), {alias}.{_qident(col)}))), N'')"
+
+def _derived_expr(alias: str, inputs: list[str], out_len: int) -> str:
+    parts = [f"COALESCE({_sql_trim(alias, c)}, N'')" for c in inputs] or ["N''"]
+    concat = " + N'|' + ".join(parts)
+    return (
+        "LEFT(CONVERT(varchar(40), HASHBYTES('SHA1', CONVERT(varbinary(max), "
+        f"{concat})), 2), {int(out_len)})"
+    )
+
+def choose_station_order_cols(view_cols: list[str]) -> list[str]:
+    prefer = [
+        # directional / station-ish
+        "STATION_MD", "MD", "MEASURED_DEPTH", "DEPTH",
+        "STATION_TVD", "STATION_TVDSS", "TVD",
+
+        # strat-ish
+        "TOP_MD", "BASE_MD",
+        "TOP_TVD", "BASE_TVD",
+        "TOP_DEPTH", "BASE_DEPTH",
+
+        # universal fallback
+        "RID",
+    ]
+    vu = {c.upper(): c for c in view_cols}
+    return [vu[p] for p in prefer if p in vu]
+
+
+    
+# -----------------------------
+# Station-table detection (helper)
+# -----------------------------
+station_mode = False
+station_parent_schema = None
+station_parent_table = None
+station_parent_keys = []
+station_seq_col = None
+station_order_cols = []
+
+station_sig = fetch_station_signature(conn, schema=tgt_schema, table=tgt_table)
+
+
+station_dec = plan_station_mode(
+    signature=station_sig,
+    view_cols=view_cols,
+    pk_cols=pk_cols,
+)
+
+
+st.caption(f"Station mode: {'ON' if station_dec.enabled else 'OFF'} — {station_dec.reason}")
+
+if station_sig:
+    station_parent_schema = station_sig.parent_schema
+    station_parent_table  = station_sig.parent_table
+    station_parent_keys   = station_sig.parent_keys or []
+    station_seq_col       = station_sig.seq_col
+    station_order_cols    = station_dec.order_cols or []
+
+station_mode = bool(station_dec.enabled)
+
+st.caption(f"Station mode: {'ON' if station_dec.enabled else 'OFF'} — {station_dec.reason}")
+# -----------------------------
+# Derived key support (hash-based registry)
+# -----------------------------
+tkey = f"{tgt_schema}.{tgt_table}".lower()
+derived_cfg = DERIVED_PK_REGISTRY.get(tkey, {})
+derived_map = (derived_cfg.get("derived", {}) or {})
+
+derived_cols_active: dict[str, dict] = {}
+for dcol, cfg in derived_map.items():
+    dcol_u = dcol.upper()
+    if dcol_u in tgt_cols_u and dcol in pk_cols:
+        derived_cols_active[dcol] = cfg
+
+# If station mode, NEVER hash-derive the station seq col (we generate it with ROW_NUMBER)
+if station_mode and station_seq_col:
+    derived_cols_active.pop(station_seq_col, None)
+
+derived_u = {c.upper() for c in derived_cols_active.keys()}
+
+if derived_cols_active:
+    st.caption("Derived PK enabled: " + ", ".join(derived_cols_active.keys()))
 else:
-    if not sql_preview_merge or not sql_merge:
-        st.warning("Promote SQL not ready yet (merge/update). Build SQL above this section first.")
+    st.caption("Derived PK: none (or not configured).")
+
+# Validate derived inputs exist in view
+for dcol, cfg in derived_cols_active.items():
+    missing_inputs = [c for c in cfg.get("inputs", []) if c.upper() not in view_cols_u]
+    if missing_inputs:
+        st.error(
+            f"Derived column {dcol} configured with inputs not in NORM view: {missing_inputs}. "
+            "Fix mapping / rebuild view or adjust DERIVED_PK_REGISTRY."
+        )
         st.stop()
 
+# CROSS APPLY for derived cols (non-station mode uses h.<col>; station mode inlines into src)
+cross_apply_sql = ""
+derived_select_cols_sql = ""  # only used in station CTE so derived cols are visible as columns
+if derived_cols_active:
+    bits = []
+    sel_bits = []
+    for dcol, cfg in derived_cols_active.items():
+        expr = _derived_expr("v", cfg.get("inputs", []), int(cfg.get("len", 20)))
+        bits.append(f"{expr} AS {_qident(dcol)}")
+        sel_bits.append(f"h.{_qident(dcol)} AS {_qident(dcol)}")
+    cross_apply_sql = "CROSS APPLY (SELECT " + ", ".join(bits) + ") h"
+    derived_select_cols_sql = ", " + ", ".join(sel_bits)
+
 # -----------------------------
-# Buttons
+# Build final insert column list:
+# - start with insertable_from_view
+# - ensure ALL PK cols exist via view, derived, or station seq
+# - add PPDM_GUID + audit cols
+# -----------------------------
+final_cols = list(insertable_from_view)
+
+for pk in pk_cols:
+    pku = pk.upper()
+
+    if station_mode and station_seq_col and pku == station_seq_col.upper():
+        if pk not in final_cols:
+            final_cols.append(pk)
+        continue
+
+    if pku in view_cols_u and pku in tgt_cols_u:
+        col_real = view_cols_u[pku]
+        if col_real not in final_cols:
+            final_cols.append(col_real)
+        continue
+
+    if pku in derived_u:
+        if pk not in final_cols:
+            final_cols.append(pk)
+        continue
+
+    st.error(
+        f"PK column '{pk}' is not available in NORM view and not derived (and not station-sequenced). "
+        f"Cannot safely promote into {target_fqn}."
+    )
+    st.stop()
+
+if "PPDM_GUID" in tgt_cols_u and "PPDM_GUID" not in {c.upper() for c in final_cols}:
+    final_cols.append("PPDM_GUID")
+
+for a in ["ROW_CREATED_BY", "ROW_CREATED_DATE", "ROW_CHANGED_BY", "ROW_CHANGED_DATE", "ROW_EFFECTIVE_DATE"]:
+    if a in tgt_cols_u and a not in {c.upper() for c in final_cols}:
+        final_cols.append(a)
+
+st.caption(f"Final column list (used for INSERT; MERGE updates only non-PK): {len(final_cols)}")
+with st.expander("Final columns", expanded=False):
+    st.code(", ".join(final_cols))
+
+# -----------------------------
+# SELECT expression per column (INSERT)
+# -----------------------------
+def _select_expr_insert(col: str) -> str:
+    u = col.upper()
+
+    # station seq col comes from src v.[seq_col]
+    if station_mode and station_seq_col and u == station_seq_col.upper():
+        return f"v.{_qident(station_seq_col)}"
+
+    # derived hash cols:
+    if u in derived_u:
+        # non-station: CROSS APPLY alias is h
+        if not station_mode:
+            return f"h.{_qident(col)}"
+        # station: derived cols were projected into src as real columns
+        return f"v.{_qident(col)}"
+
+    if u in AUDIT_DEFAULTS_INSERT:
+        return AUDIT_DEFAULTS_INSERT[u]()
+    if u == "PPDM_GUID":
+        return "CONVERT(nvarchar(36), NEWID())"
+    if u in view_cols_u:
+        return f"v.{_qident(view_cols_u[u])}"
+    return "NULL"
+
+# -----------------------------
+# PK predicates + EXISTS predicates
+# -----------------------------
+pk_not_null_preds = []
+exists_preds = []
+
+for pk in pk_cols:
+    pku = pk.upper()
+
+    if station_mode and station_seq_col and pku == station_seq_col.upper():
+        pk_not_null_preds.append(f"v.{_qident(station_seq_col)} IS NOT NULL")
+        exists_preds.append(f"t.{_qident(pk)} = v.{_qident(station_seq_col)}")
+        continue
+
+    if pku in derived_u:
+        if station_mode:
+            pk_not_null_preds.append(f"v.{_qident(pk)} IS NOT NULL")
+            exists_preds.append(f"t.{_qident(pk)} = v.{_qident(pk)}")
+        else:
+            pk_not_null_preds.append(f"h.{_qident(pk)} IS NOT NULL")
+            exists_preds.append(f"t.{_qident(pk)} = h.{_qident(pk)}")
+        continue
+
+    pk_not_null_preds.append(f"v.{_qident(pk)} IS NOT NULL")
+    exists_preds.append(f"t.{_qident(pk)} = v.{_qident(pk)}")
+
+pk_not_null_sql = " AND ".join(pk_not_null_preds)
+exists_sql = " AND ".join(exists_preds)
+
+# -----------------------------
+# Build column SQL (INSERT)
+# -----------------------------
+col_sql_insert = ", ".join(_qident(c) for c in final_cols)
+sel_sql_insert = ", ".join(f"{_select_expr_insert(c)} AS {_qident(c)}" for c in final_cols)
+
+# -----------------------------
+# Station CTE (optional)
+# - generates station_seq_col with ROW_NUMBER()
+# - gates on parent existence to prevent FK errors
+# - optionally projects derived hash cols into src as real columns
+# -----------------------------
+station_cte_sql = ""
+from_sql_insert = f"FROM {norm_view} v\n{cross_apply_sql}".rstrip()
+
+if station_mode and station_seq_col:
+    parent_full = f"[{station_parent_schema}].[{station_parent_table}]"
+    parent_keys_sql = ", ".join([f"v.{_qident(k)}" for k in station_parent_keys])
+
+    # ORDER BY: use best station axis if possible, else tie-break stable-ish
+    if station_order_cols:
+        first = station_order_cols[0]
+        rest  = station_order_cols[1:]
+        order_parts = [
+            f"CASE WHEN TRY_CONVERT(float, v.{_qident(first)}) IS NULL THEN 1 ELSE 0 END",
+            f"TRY_CONVERT(float, v.{_qident(first)})",
+        ] + [f"v.{_qident(c)}" for c in rest]
+        order_sql = ", ".join(order_parts)
+    else:
+        # fallback to first parent key (last resort)
+        order_sql = f"v.{_qident(station_parent_keys[0])}"
+
+    parent_exists_sql = " AND ".join([f"h.{_qident(k)} = v.{_qident(k)}" for k in station_parent_keys])
+    parent_not_null_sql = " AND ".join([f"v.{_qident(k)} IS NOT NULL" for k in station_parent_keys])
+
+    station_cte_sql = f"""
+;WITH src AS (
+    SELECT
+        v.*{derived_select_cols_sql},
+        CAST(ROW_NUMBER() OVER (
+            PARTITION BY {parent_keys_sql}
+            ORDER BY {order_sql}
+        ) AS int) AS {_qident(station_seq_col)}
+    FROM {norm_view} v
+    {cross_apply_sql}
+    WHERE {parent_not_null_sql}
+      AND EXISTS (
+          SELECT 1
+          FROM {parent_full} h
+          WHERE {parent_exists_sql}
+      )
+)
+""".strip()
+
+    # In station mode, outer queries read FROM src v (no CROSS APPLY outside)
+    from_sql_insert = "FROM src v"
+
+# ============================================================
+# INSERT-ONLY SQL
+# ============================================================
+sql_count_insert = f"""
+SET NOCOUNT ON;
+{station_cte_sql}
+SELECT COUNT(*) AS would_insert
+{from_sql_insert}
+WHERE {pk_not_null_sql}
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {target_full} t
+      WHERE {exists_sql}
+  );
+""".strip()
+
+sql_insert = f"""
+SET NOCOUNT ON;
+BEGIN TRAN;
+
+{station_cte_sql}
+INSERT INTO {target_full} ({col_sql_insert})
+SELECT {sel_sql_insert}
+{from_sql_insert}
+WHERE {pk_not_null_sql}
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {target_full} t
+      WHERE {exists_sql}
+  );
+
+SELECT @@ROWCOUNT AS rows_inserted;
+
+COMMIT TRAN;
+""".strip()
+
+# ============================================================
+# MERGE/UPDATE SQL (FIXED aliasing)
+# - ON clause references only t.<col> and src.<col>
+# - derived cols surfaced as src.<derived_col>
+# - station seq col surfaced as src.<seq_col> via station CTE
+# ============================================================
+
+# Build a USING projection that includes:
+#   1) all view columns (v.<col>) as themselves
+#   2) derived cols (non-station: computed via expr; station: already present in src)
+#   3) station seq col (station: present in src)
+using_proj = []
+for c in view_cols:
+    using_proj.append(f"v.{_qident(c)} AS {_qident(c)}")
+
+# Derived cols: if non-station, compute expressions in USING; if station, they already exist in src
+if derived_cols_active:
+    if station_mode:
+        for dcol in derived_cols_active.keys():
+            using_proj.append(f"v.{_qident(dcol)} AS {_qident(dcol)}")
+    else:
+        for dcol, cfg in derived_cols_active.items():
+            expr = _derived_expr("v", cfg.get("inputs", []), int(cfg.get("len", 20)))
+            using_proj.append(f"{expr} AS {_qident(dcol)}")
+
+# Station seq col
+if station_mode and station_seq_col:
+    using_proj.append(f"v.{_qident(station_seq_col)} AS {_qident(station_seq_col)}")
+
+using_proj_sql = ",\n        ".join(using_proj)
+
+# USING source: from norm_view normally; from src in station mode
+using_prefix = ""
+using_from = f"FROM {norm_view} v\n{cross_apply_sql}".rstrip()
+
+if station_mode and station_seq_col:
+    using_prefix = station_cte_sql
+    using_from = "FROM src v"  # v is the src alias here; derived cols + seq col exist
+
+using_sql = f"""
+{using_prefix}
+(
+    SELECT
+        {using_proj_sql}
+    {using_from}
+    WHERE {pk_not_null_sql}
+) AS src
+""".strip()
+
+# ON clause: match on PK columns
+on_parts = []
+for pk in pk_cols:
+    on_parts.append(f"t.{_qident(pk)} = src.{_qident(pk)}")
+on_sql_merge = " AND ".join(on_parts)
+
+pk_u = {p.upper() for p in pk_cols}
+
+def _src_expr(col: str) -> str:
+    u = col.upper()
+    if u in AUDIT_DEFAULTS_UPDATE:
+        return AUDIT_DEFAULTS_UPDATE[u]()
+    if u == "PPDM_GUID":
+        return f"t.{_qident(col)}"
+    return f"src.{_qident(col)}"
+
+def _is_blank(expr: str) -> str:
+    return f"({expr} IS NULL OR NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), {expr}))), N'') IS NULL)"
+
+def _has_value(expr: str) -> str:
+    return f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), {expr}))), N'') IS NOT NULL"
+
+updatable_cols = [c for c in insertable_from_view if c.upper() not in pk_u and c.upper() != "RID"]
+for a in ["ROW_CHANGED_BY", "ROW_CHANGED_DATE"]:
+    if a in tgt_cols_u and a not in {c.upper() for c in updatable_cols}:
+        updatable_cols.append(a)
+
+set_lines = []
+for c in updatable_cols:
+    u = c.upper()
+    tgt_expr = f"t.{_qident(c)}"
+    src_expr = _src_expr(c)
+
+    if u in {"ROW_CHANGED_BY", "ROW_CHANGED_DATE"}:
+        set_lines.append(f"{tgt_expr} = {src_expr}")
+        continue
+
+    src_has = _has_value(src_expr)
+    if update_style == "Fill-only":
+        cond = f"{_is_blank(tgt_expr)} AND {src_has}"
+        set_lines.append(f"{tgt_expr} = CASE WHEN {cond} THEN {src_expr} ELSE {tgt_expr} END")
+    else:
+        set_lines.append(f"{tgt_expr} = CASE WHEN {src_has} THEN {src_expr} ELSE {tgt_expr} END")
+
+set_sql = ",\n    ".join(set_lines) if set_lines else f"t.{_qident(pk_cols[0])} = t.{_qident(pk_cols[0])}"
+
+def _insert_value_expr(col: str) -> str:
+    u = col.upper()
+    if u in AUDIT_DEFAULTS_INSERT:
+        return AUDIT_DEFAULTS_INSERT[u]()
+    if u == "PPDM_GUID":
+        return "CONVERT(nvarchar(36), NEWID())"
+    return f"src.{_qident(col)}"
+
+sql_preview_merge = f"""
+SET NOCOUNT ON;
+SELECT
+  SUM(CASE WHEN EXISTS (
+      SELECT 1 FROM {target_full} t WHERE {" AND ".join([f"t.{_qident(pk)} = src.{_qident(pk)}" for pk in pk_cols])}
+  ) THEN 1 ELSE 0 END) AS would_match,
+  SUM(CASE WHEN NOT EXISTS (
+      SELECT 1 FROM {target_full} t WHERE {" AND ".join([f"t.{_qident(pk)} = src.{_qident(pk)}" for pk in pk_cols])}
+  ) THEN 1 ELSE 0 END) AS missing_in_target
+FROM {using_sql};
+""".strip()
+
+sql_merge = f"""
+SET NOCOUNT ON;
+
+MERGE {target_full} AS t
+USING {using_sql}
+ON {on_sql_merge}
+WHEN MATCHED THEN
+    UPDATE SET
+    {set_sql}
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT ({col_sql_insert})
+    VALUES ({", ".join([_insert_value_expr(c) for c in final_cols])});
+""".strip()
+
+# -----------------------------
+# Buttons + execution
 # -----------------------------
 c1, c2 = st.columns([1, 1])
 
@@ -1996,5 +2596,6 @@ else:
     with st.expander("SQL (merge/update)", expanded=False):
         st.code(sql_preview_merge, language="sql")
         st.code(sql_merge, language="sql")
+
 
 
