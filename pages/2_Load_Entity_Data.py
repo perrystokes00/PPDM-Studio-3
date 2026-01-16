@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 import json
 
+from dataclasses import dataclass
+
 import ppdm_loader.db as db
 from ppdm_loader.stage import save_upload, stage_bulk_insert, DELIM_MAP
 from ppdm_loader.normalize import build_primary_norm_view_sql
@@ -508,41 +510,139 @@ except Exception as e:
 
 # ============================================================
 # STEP 6 — FK Resolver (ONLY mapped FKs) + Parent Loaders
-#   - Scan missing by FK column (mapped only)
-#   - Group missing by parent table
-#   - For selected parent: mapping grid (columns, not cells)
-#   - TEST (ROLLBACK) / APPLY (COMMIT)
+# Option A behavior:
+#   - If ALL FK parents are satisfied => show success + set flag
+#   - DO NOT st.stop() the page (so Promote UI below can still render)
 # ============================================================
+
 st.header("Step 6 — FK Resolver (parent loaders)")
 
+import json
+import getpass
+from pathlib import Path
+
+# ------------------------------------------------------------
+# Created-by / loaded-by (audit defaults)
+# ------------------------------------------------------------
 created_by = (
     st.session_state.get("loaded_by")
     or st.session_state.get("user_name")
-    or getpass.getuser()            # Windows / SQL user
+    or getpass.getuser()
     or "ppdm_loader"
 )
 
-
-# -----------------------------
-# Helpers (local, so no import/indent issues)
-# -----------------------------
-def _qident(name: str) -> str:
-    n = (name or "").replace("]", "]]")
-    return f"[{n}]"
-
+# ------------------------------------------------------------
+# Helpers (local so Step 6 is self-contained)
+# ------------------------------------------------------------
 def _strip_brackets(s: str) -> str:
     return (s or "").replace("[", "").replace("]", "").strip()
+
+def _qident(name: str) -> str:
+    n = _strip_brackets(name).replace("]", "]]")
+    return f"[{n}]"
 
 def _qfqn(schema: str, name: str) -> str:
     return f"{_qident(schema)}.{_qident(name)}"
 
-def _norm_fqn_sql(fqn: str) -> str:
-    fqn = _strip_brackets(fqn)
+def _require_schema_qualified(fqn: str, label: str = "object") -> tuple[str, str]:
+    fqn = _strip_brackets(fqn or "")
     if "." not in fqn:
-        raise ValueError(f"norm_view_fqn must be schema-qualified like dbo.view_name, got: {fqn}")
-    s, n = fqn.split(".", 1)
+        raise ValueError(f"{label} must be schema-qualified like dbo.name, got: {fqn}")
+    a, b = fqn.split(".", 1)
+    return a.strip(), b.strip()
+
+def _norm_fqn_sql(fqn: str) -> str:
+    s, n = _require_schema_qualified(fqn, "norm_view_fqn")
     return _qfqn(s, n)
 
+def _s6_sql_literal(val: str) -> str:
+    v = (val or "").replace("'", "''")
+    return f"N'{v}'"
+
+def _safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame() if df is None else df.copy()
+
+def _ss_df(key: str) -> pd.DataFrame:
+    v = st.session_state.get(key)
+    return v if isinstance(v, pd.DataFrame) else pd.DataFrame()
+
+# ------------------------------------------------------------
+# FK introspection (local, DB-driven)
+# ------------------------------------------------------------
+@dataclass
+class FKInfo:
+    fk_name: str
+    child_schema: str
+    child_table: str
+    parent_schema: str
+    parent_table: str
+    pairs: list[tuple[str, str]]  # (child_col, parent_col)
+
+def introspect_fk_by_child_col(conn, *, child_schema: str, child_table: str, child_col: str) -> FKInfo | None:
+    """
+    Returns FKInfo for the FK that includes (child_schema.child_table.child_col).
+    If multiple FKs include that column, returns the first by fk_name (stable enough for Step 6).
+    """
+    sql = """
+    ;WITH fks AS (
+        SELECT
+            fk.name AS fk_name,
+            sch_child.name AS child_schema,
+            t_child.name AS child_table,
+            sch_parent.name AS parent_schema,
+            t_parent.name AS parent_table,
+            c_child.name AS child_col,
+            c_parent.name AS parent_col,
+            fkc.constraint_column_id
+        FROM sys.foreign_keys fk
+        JOIN sys.foreign_key_columns fkc
+             ON fkc.constraint_object_id = fk.object_id
+        JOIN sys.tables t_child
+             ON t_child.object_id = fk.parent_object_id
+        JOIN sys.schemas sch_child
+             ON sch_child.schema_id = t_child.schema_id
+        JOIN sys.columns c_child
+             ON c_child.object_id = t_child.object_id
+            AND c_child.column_id = fkc.parent_column_id
+        JOIN sys.tables t_parent
+             ON t_parent.object_id = fk.referenced_object_id
+        JOIN sys.schemas sch_parent
+             ON sch_parent.schema_id = t_parent.schema_id
+        JOIN sys.columns c_parent
+             ON c_parent.object_id = t_parent.object_id
+            AND c_parent.column_id = fkc.referenced_column_id
+        WHERE sch_child.name = ? AND t_child.name = ? AND c_child.name = ?
+    )
+    SELECT *
+    FROM fks
+    ORDER BY fk_name, constraint_column_id;
+    """
+    df = db.read_sql(conn, sql, params=[child_schema, child_table, child_col])
+    if df is None or df.empty:
+        return None
+
+    fk_name = str(df.iloc[0]["fk_name"])
+    child_schema = str(df.iloc[0]["child_schema"])
+    child_table = str(df.iloc[0]["child_table"])
+    parent_schema = str(df.iloc[0]["parent_schema"])
+    parent_table = str(df.iloc[0]["parent_table"])
+
+    pairs = []
+    for _, r in df.iterrows():
+        pairs.append((str(r["child_col"]), str(r["parent_col"])))
+
+    return FKInfo(
+        fk_name=fk_name,
+        child_schema=child_schema,
+        child_table=child_table,
+        parent_schema=parent_schema,
+        parent_table=parent_table,
+        pairs=pairs,
+    )
+
+# ------------------------------------------------------------
+# Parent-table column + PK introspection
+# ------------------------------------------------------------
 def _s6_get_table_columns(conn, schema: str, table: str) -> pd.DataFrame:
     sql = """
     SELECT
@@ -560,27 +660,48 @@ def _s6_get_table_columns(conn, schema: str, table: str) -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
 
 def _s6_get_pk_columns(conn, schema: str, table: str) -> list[str]:
-    # use your existing helper if present; otherwise query
-    try:
-        pk = fetch_pk_columns(conn, schema=schema, table=table) or []
-        return list(pk)
-    except Exception:
-        sql = """
-        SELECT c.name AS column_name
-        FROM sys.indexes i
-        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-        JOIN sys.tables  t ON t.object_id = i.object_id
-        JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE i.is_primary_key = 1 AND s.name = ? AND t.name = ?
-        ORDER BY ic.key_ordinal;
-        """
-        df = db.read_sql(conn, sql, params=[schema, table])
-        if df is None or df.empty:
-            return []
-        return df["column_name"].astype(str).tolist()
+    sql = """
+    SELECT c.name AS column_name
+    FROM sys.indexes i
+    JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+    JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    JOIN sys.tables  t ON t.object_id = i.object_id
+    JOIN sys.schemas s ON s.schema_id = t.schema_id
+    WHERE i.is_primary_key = 1 AND s.name = ? AND t.name = ?
+    ORDER BY ic.key_ordinal;
+    """
+    df = db.read_sql(conn, sql, params=[schema, table])
+    if df is None or df.empty:
+        return []
+    return df["column_name"].astype(str).tolist()
 
-def _s6_build_missing_sql_for_fk(*, norm_view_sql: str, parent_fqn_sql: str, fk_pairs: list[tuple[str, str]], top_n: int) -> tuple[str, str]:
+# ------------------------------------------------------------
+# NORM view columns (so dropdowns + __NAT logic works reliably)
+# ------------------------------------------------------------
+def _s6_get_view_columns(conn, norm_view_fqn: str) -> list[str]:
+    try:
+        s, n = _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
+    except Exception:
+        return []
+
+    sql = """
+    SELECT c.name AS col_name
+    FROM sys.columns c
+    JOIN sys.views v ON v.object_id = c.object_id
+    JOIN sys.schemas s ON s.schema_id = v.schema_id
+    WHERE s.name = ? AND v.name = ?
+    ORDER BY c.column_id;
+    """
+    df = db.read_sql(conn, sql, params=[s, n])
+    if df is None or df.empty:
+        return []
+    return df["col_name"].astype(str).tolist()
+
+# ------------------------------------------------------------
+# Missing SQL builder (by FK pairs)
+# ------------------------------------------------------------
+def _s6_build_missing_sql_for_fk(*, norm_view_sql: str, parent_fqn_sql: str, fk_pairs: list[tuple[str, str]], top_n: int,
+                                view_cols_u: dict[str, str]) -> tuple[str, str]:
     proj_exprs = []
     req_preds = []
     join_preds = []
@@ -588,14 +709,14 @@ def _s6_build_missing_sql_for_fk(*, norm_view_sql: str, parent_fqn_sql: str, fk_
 
     for child_col, parent_col in fk_pairs:
         nat_col = f"{child_col}__NAT"
-        # prefer __NAT if present, else raw column
+
+        # prefer NAT column if present in view
         if nat_col.upper() in view_cols_u:
             src_ref = f"v.{_qident(view_cols_u[nat_col.upper()])}"
         elif child_col.upper() in view_cols_u:
             src_ref = f"v.{_qident(view_cols_u[child_col.upper()])}"
         else:
-            # missing column => SQL will fail; caller will detect earlier
-            src_ref = f"v.{_qident(nat_col)}"
+            src_ref = f"v.{_qident(nat_col)}"  # will error later; we’ll catch earlier
 
         expr = f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), {src_ref}))), N'')"
         proj_exprs.append(f"{expr} AS {_qident(parent_col)}")
@@ -654,6 +775,9 @@ FROM missing;
 
     return sql_sample, sql_count
 
+# ------------------------------------------------------------
+# Mapping grid defaults + required validation
+# ------------------------------------------------------------
 def _s6_default_parent_mapping_df(
     *,
     parent_cols_df: pd.DataFrame,
@@ -662,7 +786,6 @@ def _s6_default_parent_mapping_df(
     fk_pairs_child_to_parent: list[tuple[str, str]],
     loaded_map: dict | None,
 ) -> pd.DataFrame:
-    # row per parent column, default Include=Y for PK + FK parent cols, otherwise N
     pk_u = {c.upper() for c in (parent_pk_cols or [])}
     fk_parent_u = {p.upper() for (_, p) in (fk_pairs_child_to_parent or [])}
     view_u = {c.upper(): c for c in view_cols}
@@ -675,14 +798,10 @@ def _s6_default_parent_mapping_df(
         is_computed = int(r.get("is_computed", 0) or 0)
         is_identity = int(r.get("is_identity", 0) or 0)
 
-        # skip computed/identity from inclusion by default
         include = "N" if (is_computed or is_identity) else ("Y" if (col.upper() in pk_u or col.upper() in fk_parent_u) else "N")
 
-        # default source mapping from fk pairs
+        # default mapping based on FK pairs
         src_default = ""
-        const_default = ""
-
-        # if parent col is part of fk-parent key, map it from the child's NAT col (if present) else raw child col
         for child_col, parent_col in (fk_pairs_child_to_parent or []):
             if parent_col.upper() == col.upper():
                 nat = f"{child_col}__NAT"
@@ -699,16 +818,16 @@ def _s6_default_parent_mapping_df(
                 "target_column": col,
                 "not_null": not_null,
                 "source_column": src_default,
-                "constant_value": const_default,
+                "constant_value": "",
             }
         )
 
     df = pd.DataFrame(rows)
 
-    # Apply loaded map if present
+    # overlay saved mapping if present
     if loaded_map and isinstance(loaded_map, dict):
         grid_rows = loaded_map.get("grid_rows") or []
-        if grid_rows:
+        if isinstance(grid_rows, list) and grid_rows:
             lm = pd.DataFrame(grid_rows)
             if "target_column" in lm.columns:
                 lm_u = {str(tc).upper(): row for tc, row in zip(lm["target_column"].astype(str), lm.to_dict(orient="records"))}
@@ -726,7 +845,7 @@ def _s6_default_parent_mapping_df(
     return df
 
 def _s6_validate_required_columns(parent_cols_df: pd.DataFrame, edited_df: pd.DataFrame) -> list[str]:
-    # NOT NULL + insertable (not computed/identity) must be supplied via source/constant or auto-defaults
+    # NOT NULL + insertable must be supplied (unless auto-defaults)
     not_null = set(
         parent_cols_df.loc[parent_cols_df["is_nullable"].fillna(1).astype(int).eq(0), "name"]
         .astype(str).tolist()
@@ -738,9 +857,16 @@ def _s6_validate_required_columns(parent_cols_df: pd.DataFrame, edited_df: pd.Da
             "name",
         ].astype(str).tolist()
     )
-    not_null = not_null.intersection(insertable)
+    required = {c.upper() for c in not_null.intersection(insertable)}
 
-    auto_defaults = {"ROW_CREATED_BY","ROW_CHANGED_BY","ROW_CREATED_DATE","ROW_CHANGED_DATE","ROW_EFFECTIVE_DATE","PPDM_GUID"}
+    auto_defaults = {
+        "ROW_CREATED_BY",
+        "ROW_CHANGED_BY",
+        "ROW_CREATED_DATE",
+        "ROW_CHANGED_DATE",
+        "ROW_EFFECTIVE_DATE",
+        "PPDM_GUID",
+    }
 
     ed = edited_df.copy()
     ed["include"] = ed["include"].fillna("Y").astype(str).str.upper()
@@ -750,24 +876,24 @@ def _s6_validate_required_columns(parent_cols_df: pd.DataFrame, edited_df: pd.Da
 
     provided = {}
     for _, r in ed.iterrows():
+        if r["include"] != "Y":
+            continue
         tc = r["target_column"]
-        if not tc or r["include"] != "Y":
+        if not tc:
             continue
         provided[tc.upper()] = (r["source_column"] != "") or (str(r["constant_value"]).strip() != "")
 
     missing = []
-    for col in sorted(not_null):
-        if col.upper() in auto_defaults:
+    for col_u in sorted(required):
+        if col_u in auto_defaults:
             continue
-        if not provided.get(col.upper(), False):
-            missing.append(col)
+        if not provided.get(col_u, False):
+            missing.append(col_u)
     return missing
 
-def _s6_sql_literal(val: str) -> str:
-    # treat as NVARCHAR literal
-    v = (val or "").replace("'", "''")
-    return f"N'{v}'"
-
+# ------------------------------------------------------------
+# Seed SQL builder (INSERT missing rows; TEST=ROLLBACK / APPLY=COMMIT)
+# ------------------------------------------------------------
 def _s6_build_seed_insert_sql(
     *,
     norm_view_sql: str,
@@ -778,8 +904,8 @@ def _s6_build_seed_insert_sql(
     mapping_rows: pd.DataFrame,
     created_by: str,
     test_mode: bool,
+    view_cols_u: dict[str, str],
 ) -> str:
-    # columns to insert = include=Y and insertable
     pc = parent_cols_df.copy()
     pc["name_u"] = pc["name"].astype(str).str.upper()
     insertable_u = set(
@@ -812,10 +938,9 @@ def _s6_build_seed_insert_sql(
 
     parent_fqn_sql = _qfqn(parent_schema, parent_table)
 
-    # Use PK for anti-join if present, else fall back to all included cols that appear to be key-ish
+    # keys: PK if present else all included cols
     key_cols = parent_pk_cols[:] if parent_pk_cols else [r["target_column"] for r in rows]
 
-    # Build SELECT list
     sel_parts = []
     for r in rows:
         tc = r["target_column"]
@@ -829,10 +954,9 @@ def _s6_build_seed_insert_sql(
             expr = _s6_sql_literal(created_by)
         elif u == "ROW_CHANGED_BY":
             expr = _s6_sql_literal(created_by)
-        elif u in {"ROW_CREATED_DATE","ROW_CHANGED_DATE","ROW_EFFECTIVE_DATE"}:
+        elif u in {"ROW_CREATED_DATE", "ROW_CHANGED_DATE", "ROW_EFFECTIVE_DATE"}:
             expr = "SYSUTCDATETIME()"
         elif sc:
-            # read from view
             if sc.upper() not in view_cols_u:
                 raise ValueError(f"Mapped source column '{sc}' not found in NORM view.")
             expr = f"v.{_qident(view_cols_u[sc.upper()])}"
@@ -846,17 +970,8 @@ def _s6_build_seed_insert_sql(
     sel_sql = ",\n        ".join(sel_parts)
     ins_cols_sql = ", ".join(_qident(r["target_column"]) for r in rows)
 
-    # key NOT NULL predicates (all key cols must be not null)
-    nn_preds = []
-    for kc in key_cols:
-        nn_preds.append(f"s.{_qident(kc)} IS NOT NULL")
-    nn_sql = " AND ".join(nn_preds) or "1=1"
-
-    # anti-join predicates on keys
-    join_preds = []
-    for kc in key_cols:
-        join_preds.append(f"t.{_qident(kc)} = s.{_qident(kc)}")
-    join_sql = " AND ".join(join_preds) or "1=0"
+    nn_sql = " AND ".join([f"s.{_qident(kc)} IS NOT NULL" for kc in key_cols]) or "1=1"
+    join_sql = " AND ".join([f"t.{_qident(kc)} = s.{_qident(kc)}" for kc in key_cols]) or "1=0"
 
     end_tx = "ROLLBACK TRANSACTION;" if test_mode else "COMMIT TRANSACTION;"
 
@@ -889,218 +1004,212 @@ SELECT @@ROWCOUNT AS rows_inserted;
 
     return sql
 
-# -----------------------------
-# Inputs / state
-# -----------------------------
-norm_view_sql = _norm_fqn_sql(norm_view_fqn)
+# ------------------------------------------------------------
+# Step 6 state defaults (Option A needs these)
+# ------------------------------------------------------------
+st.session_state.setdefault("s6_no_missing_parents", False)
+st.session_state.setdefault("s6_scan_df", pd.DataFrame())
 
+# ------------------------------------------------------------
+# Read norm_view_fqn + view columns
+# ------------------------------------------------------------
+norm_view_fqn = (st.session_state.get("norm_view_fqn") or st.session_state.get("norm_view_name") or "").strip()
+if not norm_view_fqn:
+    st.warning("No normalized view found (norm_view_fqn). Build the NORM view in Step 5 first.")
+    st.session_state["s6_no_missing_parents"] = True
+else:
+    # Refresh view columns from DB (reliable; avoids NameErrors later)
+    view_cols = _s6_get_view_columns(conn, norm_view_fqn)
+    view_cols_u = {str(c).upper(): str(c) for c in view_cols}
+
+# ============================================================
+# 6A — Identify FK columns to check (ONLY mapped + Treat-as-FK)
+# ============================================================
 primary_map_df = st.session_state.get("primary_map_df")
 if primary_map_df is None or primary_map_df.empty:
-    st.warning("No mapping found (primary_map_df). Complete Step 4, then rebuild the NORM view.")
-    st.stop()
+    st.warning("No mapping found (primary_map_df). Complete Step 4 first.")
+    st.session_state["s6_no_missing_parents"] = True
+else:
+    m = primary_map_df.copy()
+    for c in ("column_name", "source_column", "constant_value", "treat_as_fk"):
+        if c not in m.columns:
+            m[c] = ""
 
-# Directory for saved parent maps (column mappings)
-map_dir = st.session_state.get("fk_seed_maps_dir") or r"C:\Users\perry\OneDrive\Documents\PPDM_Studio_3\ppdm-39-seed-packs\fk_seed_maps"
-st.caption(f"FK parent map directory: `{map_dir}`")
+    m["column_name"] = m["column_name"].fillna("").astype(str).str.strip()
+    m["source_column"] = m["source_column"].fillna("").astype(str).str.strip()
+    m["constant_value"] = m["constant_value"].fillna("").astype(str).str.strip()
+    m["treat_as_fk"] = m["treat_as_fk"].fillna(False).astype(bool)
 
-def _s6_map_path(map_dir: str, schema: str, table: str) -> Path:
-    p = Path(map_dir)
-    p.mkdir(parents=True, exist_ok=True)
-    return p / f"{schema}.{table}.json"
-
-def _s6_load_map(map_dir: str, schema: str, table: str) -> dict | None:
-    try:
-        p = _s6_map_path(map_dir, schema, table)
-        if not p.exists():
-            return None
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-def _s6_save_map(map_dir: str, schema: str, table: str, payload: dict) -> None:
-    import json
-    p = _s6_map_path(map_dir, schema, table)
-    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-# ============================================================
-# 6A — Identify FK columns to check (ONLY mapped)
-# ============================================================
-m = primary_map_df.copy()
-for c in ("column_name", "source_column", "constant_value", "treat_as_fk"):
-    if c not in m.columns:
-        m[c] = ""
-
-m["column_name"] = m["column_name"].fillna("").astype(str).str.strip()
-m["source_column"] = m["source_column"].fillna("").astype(str).str.strip()
-m["constant_value"] = m["constant_value"].fillna("").astype(str).str.strip()
-m["treat_as_fk"] = m["treat_as_fk"].fillna(False).astype(bool)
-
-mapped_fk_cols = m.loc[
-    (m["treat_as_fk"] == True)
-    & (m["column_name"] != "")
-    & ((m["source_column"] != "") | (m["constant_value"] != "")),
-    "column_name",
-].astype(str).tolist()
-mapped_fk_cols = [c for c in mapped_fk_cols if c]
-
-st.caption(f"FK columns checked (Treat-as-FK + mapped): {len(mapped_fk_cols)}")
-
-if not mapped_fk_cols:
-    st.info(
-        "No FK columns are BOTH Treat-as-FK and mapped. "
-        "Map FK columns in Step 4 (source/constant), then rebuild the NORM view."
+    mapped_fk_cols = (
+        m.loc[
+            (m["treat_as_fk"] == True)
+            & (m["column_name"] != "")
+            & ((m["source_column"] != "") | (m["constant_value"] != "")),
+            "column_name",
+        ]
+        .astype(str)
+        .tolist()
     )
-    st.stop()
+    mapped_fk_cols = [c for c in mapped_fk_cols if c]
+
+    st.caption(f"FK columns checked (Treat-as-FK + mapped): {len(mapped_fk_cols)}")
+
+    if not mapped_fk_cols:
+        st.info("No mapped Treat-as-FK columns found. Nothing to scan in Step 6.")
+        st.session_state["s6_no_missing_parents"] = True
 
 # ============================================================
-# 6B — Scan missing parents for mapped FK columns  (ONLY mapped FK cols)
+# 6B — Scan missing parents for mapped FK columns
 # ============================================================
+scan_rows = []
+# SAFE: never evaluates a DataFrame in boolean context
+scan_df = st.session_state.get("s6_scan_df")
+if scan_df is None or not isinstance(scan_df, pd.DataFrame):
+    scan_df = pd.DataFrame()
+
 
 top_n = st.number_input("Sample rows per FK (TOP N)", 10, 50000, 2000, 100, key="s6_topn")
 scan_now = st.button("Scan missing FK parents", type="primary", key="s6_scan_now")
 
-if "s6_scan_df" not in st.session_state:
-    st.session_state["s6_scan_df"] = pd.DataFrame()
+if (not st.session_state.get("s6_no_missing_parents", False)) and mapped_fk_cols and norm_view_fqn:
+    if scan_now or scan_df.empty:
+        norm_view_sql = _norm_fqn_sql(norm_view_fqn)
 
-if scan_now or st.session_state["s6_scan_df"].empty:
-    scan_rows = []
+        for child_fk_col in mapped_fk_cols:
+            fkinfo = introspect_fk_by_child_col(
+                conn,
+                child_schema=child_schema,
+                child_table=child_table,
+                child_col=child_fk_col,
+            )
+            if fkinfo is None:
+                continue
 
-    for child_fk_col in mapped_fk_cols:
-        fkinfo = introspect_fk_by_child_col(
-            conn,
-            child_schema=child_schema,
-            child_table=child_table,
-            child_col=child_fk_col,
-        )
-        if fkinfo is None:
-            continue
+            # Ensure required source columns exist in view (prefer __NAT)
+            missing_cols = []
+            for (cc, _) in fkinfo.pairs:
+                nat = f"{cc}__NAT"
+                if nat.upper() not in view_cols_u and cc.upper() not in view_cols_u:
+                    missing_cols.append(nat)
 
-        # Ensure required source columns exist in the NORM view (prefer __NAT)
-        missing_cols = []
-        for (cc, _) in fkinfo.pairs:
-            nat = f"{cc}__NAT"
-            if nat.upper() not in view_cols_u and cc.upper() not in view_cols_u:
-                missing_cols.append(nat)
+            parent_schema = fkinfo.parent_schema
+            parent_table = fkinfo.parent_table
+            parent_fqn_sql = _qfqn(parent_schema, parent_table)
 
-        parent_schema = fkinfo.parent_schema
-        parent_table = fkinfo.parent_table
-        parent_fqn_sql = _qfqn(parent_schema, parent_table)
+            sql_sample, sql_count = _s6_build_missing_sql_for_fk(
+                norm_view_sql=norm_view_sql,
+                parent_fqn_sql=parent_fqn_sql,
+                fk_pairs=fkinfo.pairs,
+                top_n=int(top_n),
+                view_cols_u=view_cols_u,
+            )
 
-        sql_sample, sql_count = _s6_build_missing_sql_for_fk(
-            norm_view_sql=norm_view_sql,
-            parent_fqn_sql=parent_fqn_sql,
-            fk_pairs=fkinfo.pairs,
-            top_n=int(top_n),
-        )
+            missing_total = None
+            err = ""
 
-        missing_total = None
-        err = ""
+            if missing_cols:
+                err = f"NORM view missing expected columns: {missing_cols}"
+            else:
+                try:
+                    cnt_df = db.read_sql(conn, sql_count)
+                    missing_total = int(cnt_df.iloc[0]["missing_total"]) if (cnt_df is not None and not cnt_df.empty) else 0
+                except Exception as e:
+                    err = str(e)
 
-        if missing_cols:
-            err = f"NORM view missing expected columns: {missing_cols}"
-        else:
-            try:
-                cnt_df = db.read_sql(conn, sql_count)
-                missing_total = int(cnt_df.iloc[0]["missing_total"]) if (cnt_df is not None and not cnt_df.empty) else 0
-            except Exception as e:
-                err = str(e)
+            scan_rows.append(
+                {
+                    "fk_name": fkinfo.fk_name,
+                    "child_column_trigger": child_fk_col,
+                    "child_cols": ", ".join([c for (c, _) in fkinfo.pairs]),
+                    "parent_schema": parent_schema,
+                    "parent_table": parent_table,
+                    "parent_cols": ", ".join([p for (_, p) in fkinfo.pairs]),
+                    "missing_total": missing_total,
+                    "error": err,
+                    "sql_count": sql_count,
+                    "sql_sample": sql_sample,
+                }
+            )
 
-        scan_rows.append(
-            {
-                "fk_name": fkinfo.fk_name,
-                "child_column_trigger": child_fk_col,
-                "child_cols": ", ".join([c for (c, _) in fkinfo.pairs]),
-                "parent_schema": parent_schema,
-                "parent_table": parent_table,
-                "parent_cols": ", ".join([p for (_, p) in fkinfo.pairs]),
-                "missing_total": missing_total,
-                "error": err,
-                "sql_count": sql_count,
-                "sql_sample": sql_sample,
-            }
-        )
+        scan_df = pd.DataFrame(scan_rows)
+        if not scan_df.empty:
+            scan_df["missing_total_sort"] = (
+                pd.to_numeric(scan_df["missing_total"], errors="coerce")
+                .fillna(0)
+                .astype("int64")
+            )
+            scan_df = scan_df.sort_values(
+                ["missing_total_sort", "parent_schema", "parent_table"],
+                ascending=[False, True, True],
+            ).drop(columns=["missing_total_sort"])
 
-    scan_df = pd.DataFrame(scan_rows)
-    if not scan_df.empty:
-        scan_df["missing_total_sort"] = (
-            pd.to_numeric(scan_df["missing_total"], errors="coerce")
-            .fillna(0)
-            .astype("int64")
-        )
-        scan_df = scan_df.sort_values(
-            ["missing_total_sort", "parent_schema", "parent_table"],
-            ascending=[False, True, True],
-        ).drop(columns=["missing_total_sort"])
+        st.session_state["s6_scan_df"] = scan_df
 
-    st.session_state["s6_scan_df"] = scan_df
+scan_df = st.session_state.get("s6_scan_df")
+if not isinstance(scan_df, pd.DataFrame):
+    scan_df = pd.DataFrame()
 
-scan_df = st.session_state["s6_scan_df"]
 
 if scan_df.empty:
-    st.warning("No FK metadata found for the mapped FK columns (or scan returned nothing).")
-    st.stop()
-
-st.subheader("FK missing-parent scan (by FK)")
-st.dataframe(
-    scan_df[
-        ["fk_name", "child_column_trigger", "child_cols", "parent_schema", "parent_table", "parent_cols", "missing_total", "error"]
-    ],
-    hide_index=True,
-    width="stretch",
-)
-
-# ============================================================
-# 6B.1 — Parent summary + parent pick (defines ps/pt)
-#   FIX: do NOT st.stop() when nothing is missing
-# ============================================================
-
-st.subheader("Parents to seed (grouped)")
-
-parents_df = (
-    scan_df.copy()
-    .groupby(["parent_schema", "parent_table"], as_index=False)
-    .agg(
-        missing_total=("missing_total", "sum"),
-        fk_count=("fk_name", "count"),
-    )
-)
-
-parents_df["missing_total"] = (
-    pd.to_numeric(parents_df["missing_total"], errors="coerce")
-    .fillna(0)
-    .astype("int64")
-)
-
-parents_df = parents_df.sort_values(
-    ["missing_total", "parent_schema", "parent_table"],
-    ascending=[False, True, True],
-)
-
-parents_df["label"] = parents_df.apply(
-    lambda r: f"{r['parent_schema']}.{r['parent_table']}  (missing≈{int(r['missing_total'])}, fks={int(r['fk_count'])})",
-    axis=1,
-)
-
-st.dataframe(
-    parents_df[["parent_schema", "parent_table", "missing_total", "fk_count"]],
-    hide_index=True,
-    width="stretch",
-)
-
-missing_sum = int(pd.to_numeric(parents_df["missing_total"], errors="coerce").fillna(0).sum())
-
-# Flag so later steps can know we are "done"
-st.session_state["s6_missing_sum"] = missing_sum
-st.session_state["s6_done"] = (missing_sum == 0)
-
-if parents_df.empty or missing_sum == 0:
-    st.success("No missing FK parents detected. Proceed to Step 7 — Promote.")
-    # ✅ DO NOT STOP — let Step 7 render below
+    st.warning("No FK metadata found for mapped FK columns (or scan returned nothing).")
+    # Option A: do NOT stop page; just mark as satisfied so Promote can still show
+    st.session_state["s6_no_missing_parents"] = True
 else:
-    # ============================================================
-    # 6C — Parent pick (ONLY shown if missing_sum > 0)
-    # ============================================================
+    st.subheader("FK missing-parent scan (by FK)")
+    with st.expander("FK scan table", expanded=False):
+        st.dataframe(
+            scan_df[
+                ["fk_name", "child_column_trigger", "child_cols", "parent_schema", "parent_table", "parent_cols", "missing_total", "error"]
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+# ============================================================
+# 6B.1 — Parent summary + parent pick (Option A)
+# ============================================================
+parents_df = pd.DataFrame()
+if not scan_df.empty:
+    parents_df = (
+        scan_df.copy()
+        .groupby(["parent_schema", "parent_table"], as_index=False)
+        .agg(
+            missing_total=("missing_total", "sum"),
+            fk_count=("fk_name", "count"),
+        )
+    )
+    parents_df["missing_total"] = (
+        pd.to_numeric(parents_df["missing_total"], errors="coerce")
+        .fillna(0)
+        .astype("int64")
+    )
+    parents_df = parents_df.sort_values(
+        ["missing_total", "parent_schema", "parent_table"],
+        ascending=[False, True, True],
+    )
+    parents_df["label"] = parents_df.apply(
+        lambda r: f"{r['parent_schema']}.{r['parent_table']}  (missing≈{int(r['missing_total'])}, fks={int(r['fk_count'])})",
+        axis=1,
+    )
+
+with st.expander("Parent summary (grouped)", expanded=False):
+    if parents_df is None or parents_df.empty:
+        st.info("No parent summary available.")
+    else:
+        st.dataframe(
+            parents_df[["parent_schema", "parent_table", "missing_total", "fk_count"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+no_missing = (parents_df is None or parents_df.empty or int(parents_df["missing_total"].sum()) == 0)
+st.session_state["s6_no_missing_parents"] = bool(no_missing)
+
+if st.session_state["s6_no_missing_parents"]:
+    st.success("No missing FK parents detected. You should be able to Promote.")
+    ps, pt = None, None
+else:
+    # NOTE: Only one selectbox with this key anywhere in Step 6.
     pick_parent = st.selectbox(
         "Pick a parent table to seed",
         parents_df["label"].tolist(),
@@ -1108,208 +1217,235 @@ else:
     )
     ps, pt = pick_parent.split("  (missing≈", 1)[0].split(".", 1)
 
-    # ============================================================
-    # 6D — Get FK rows driving this parent (from scan)
-    # ============================================================
+# ============================================================
+# 6D — FK rows driving this selected parent (from scan)
+# ============================================================
+fk_rows = pd.DataFrame()
+fk_pairs_default: list[tuple[str, str]] = []
+
+if ps and pt:
     fk_rows = scan_df.loc[(scan_df["parent_schema"] == ps) & (scan_df["parent_table"] == pt)].copy()
-    if fk_rows.empty:
-        st.warning("No FK rows found for the selected parent (from scan). Re-scan Step 6B.")
-    else:
-        st.subheader("FKs referencing this parent (from scan)")
+
+    st.subheader(f"FKs referencing this parent: {ps}.{pt}")
+    with st.expander("FKs referencing selected parent", expanded=False):
         st.dataframe(
-            fk_rows[["fk_name", "child_column_trigger", "child_cols", "parent_cols", "missing_total", "error"]],
+            _safe_df(fk_rows)[["fk_name", "child_column_trigger", "child_cols", "parent_cols", "missing_total", "error"]],
             hide_index=True,
             width="stretch",
         )
 
-        # Default fk pairs (composite basis) from the first trigger column
-        fk_pairs_default: list[tuple[str, str]] = []
+    try:
+        trig = str(fk_rows.iloc[0].get("child_column_trigger") or "")
+        fkinfo0 = introspect_fk_by_child_col(conn, child_schema=child_schema, child_table=child_table, child_col=trig)
+        fk_pairs_default = fkinfo0.pairs if fkinfo0 is not None else []
+    except Exception:
+        fk_pairs_default = []
+
+# ============================================================
+# 6E — Introspect parent columns + PK + mapping grid (behind expanders)
+# ============================================================
+parent_cols_df = pd.DataFrame()
+parent_pk_cols: list[str] = []
+parent_introspect_error = ""
+
+if ps and pt:
+    try:
+        parent_cols_df = _s6_get_table_columns(conn, ps, pt)
+        parent_pk_cols = _s6_get_pk_columns(conn, ps, pt)
+    except Exception as e:
+        parent_introspect_error = str(e)
+
+with st.expander("Parent table structure (debug)", expanded=False):
+    if not ps or not pt:
+        st.info("No parent selected (no missing parents, or scan not run).")
+    elif parent_introspect_error:
+        st.error(f"Could not introspect parent table {ps}.{pt}")
+        st.code(parent_introspect_error)
+    elif parent_cols_df.empty:
+        st.warning("No parent column metadata found.")
+    else:
+        st.caption(f"Parent PK: {', '.join(parent_pk_cols) if parent_pk_cols else '(not detected)'}")
+        st.dataframe(
+            parent_cols_df[["name", "is_nullable", "is_computed", "is_identity"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+# If we can't build a mapping grid, skip seeding UI (but DO NOT stop the page)
+if ps and pt and (not parent_cols_df.empty) and (not parent_introspect_error):
+    # ---- map save/load path ----
+    map_dir = Path(
+        st.session_state.get("s6_map_dir")
+        or r"C:\Users\perry\OneDrive\Documents\PPDM_Studio_3\ppdm-39-seed-packs\fk_seed_maps"
+    )
+    st.session_state["s6_map_dir"] = str(map_dir)
+
+    def _s6_map_path(map_dir: Path, schema: str, table: str) -> Path:
+        map_dir.mkdir(parents=True, exist_ok=True)
+        return map_dir / f"{schema}.{table}.fkmap.json"
+
+    def _s6_load_map(map_dir: Path, schema: str, table: str) -> dict | None:
+        p = _s6_map_path(map_dir, schema, table)
+        if not p.exists():
+            return None
         try:
-            trig = str(fk_rows.iloc[0].get("child_column_trigger") or "")
-            fkinfo0 = introspect_fk_by_child_col(
-                conn,
-                child_schema=child_schema,
-                child_table=child_table,
-                child_col=trig,
-            )
-            fk_pairs_default = fkinfo0.pairs if fkinfo0 is not None else []
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            fk_pairs_default = []
+            return None
 
-            # ============================================================
-            # 6E — Introspect parent columns + PK
-            #   - Never crash Step 6
-            #   - Only show structure if we have it
-            # ============================================================
+    def _s6_save_map(map_dir: Path, schema: str, table: str, payload: dict) -> None:
+        p = _s6_map_path(map_dir, schema, table)
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-            parent_cols_df = pd.DataFrame()
-            parent_pk_cols: list[str] = []
-            parent_introspect_error = ""
+    loaded_map = _s6_load_map(map_dir, ps, pt)
 
-            try:
-                parent_cols_df = _s6_get_table_columns(conn, ps, pt)
-                parent_pk_cols = _s6_get_pk_columns(conn, ps, pt)
-            except Exception as e:
-                parent_introspect_error = str(e)
-                st.error(f"Could not introspect parent table {ps}.{pt}: {e}")
+    mapping_df = _s6_default_parent_mapping_df(
+        parent_cols_df=parent_cols_df,
+        parent_pk_cols=parent_pk_cols,
+        view_cols=view_cols,
+        fk_pairs_child_to_parent=fk_pairs_default,
+        loaded_map=loaded_map,
+    )
 
-            # Show parent structure behind expander (only if we have data)
-            with st.expander(f"Parent table structure: {ps}.{pt}", expanded=False):
-                if parent_introspect_error:
-                    st.warning("Parent introspection failed; mapping grid cannot be built until this is fixed.")
-                    st.code(parent_introspect_error)
+    st.subheader("Parent insert mapping (target columns ⇐ NORM view columns / constants)")
+    st.caption("Tip: keep structure and SQL behind expanders; the grid is the main UI.")
 
-                if parent_cols_df is None or parent_cols_df.empty:
-                    st.info("No parent column metadata available.")
-                else:
-                    st.caption(f"Parent PK: {', '.join(parent_pk_cols) if parent_pk_cols else '(not detected)'}")
-                    st.dataframe(
-                        parent_cols_df[["name", "is_nullable", "is_computed", "is_identity"]],
-                        hide_index=True,
-                        width="stretch",
-                    )
+    editor_cols = ["include", "is_pk", "target_column", "not_null", "source_column", "constant_value"]
+    col_config = {
+        "include": st.column_config.SelectboxColumn("Include", options=["Y", "N"], width="small"),
+        "is_pk": st.column_config.TextColumn("PK", disabled=True, width="small"),
+        "target_column": st.column_config.TextColumn("Target Column", disabled=True),
+        "not_null": st.column_config.TextColumn("NOT NULL", disabled=True, width="small"),
+        "source_column": st.column_config.SelectboxColumn("Source Column (NORM view)", options=[""] + view_cols),
+        "constant_value": st.column_config.TextColumn("Constant (optional)"),
+    }
 
-            # If no columns, skip ONLY the mapping/seed UI, but keep Step 6 alive
-            if parent_cols_df is None or parent_cols_df.empty:
-                st.stop()  # (or `pass` if you want to keep other parts below running)
+    edited = st.data_editor(
+        mapping_df[editor_cols],
+        hide_index=True,
+        width="stretch",
+        column_config=col_config,
+        key=f"s6_parent_mapping_editor__{ps}.{pt}",
+    )
 
+    b0, b1, b2 = st.columns([1, 1, 2])
+    do_save = b0.button("Save mapping", type="primary", key=f"s6_save_map__{ps}.{pt}")
+    do_test = b1.button("TEST seed (ROLLBACK)", key=f"s6_test_seed__{ps}.{pt}")
+    do_apply = b2.button("APPLY seed (COMMIT)", key=f"s6_apply_seed__{ps}.{pt}")
 
-            # mapping dir (use existing map_dir from earlier in Step 6 if you have it)
-            map_dir = None
-            try:
-                if "s6_map_dir" in st.session_state:
-                    map_dir = Path(st.session_state["s6_map_dir"])
-            except Exception:
-                map_dir = None
+    if do_save:
+        payload = {
+            "table_schema": ps,
+            "table_name": pt,
+            "table_fqn": f"{ps}.{pt}",
+            "pk_columns": parent_pk_cols,
+            "grid_rows": edited.to_dict(orient="records"),
+        }
+        _s6_save_map(map_dir, ps, pt, payload)
+        st.success(f"Saved mapping: {str(_s6_map_path(map_dir, ps, pt))}")
 
-            if map_dir is None:
-                map_dir = Path(r"C:\Users\perry\OneDrive\Documents\PPDM_Studio_3\ppdm-39-seed-packs\fk_seed_maps")
-            st.session_state["s6_map_dir"] = str(map_dir)
+    # ============================================================
+    # 6F — Missing-detection SQL (debug)
+    # ============================================================
+    with st.expander("Missing-detection SQL (debug)", expanded=False):
+        if fk_rows is not None and not fk_rows.empty:
+            first_row = fk_rows.iloc[0].to_dict()
+            st.caption("sql_count")
+            st.code(str(first_row.get("sql_count", "")), language="sql")
+            st.caption("sql_sample")
+            st.code(str(first_row.get("sql_sample", "")), language="sql")
+        else:
+            st.info("No FK rows available for this parent.")
 
-            loaded_map = _s6_load_map(map_dir, ps, pt)
+    # ============================================================
+    # 6G — Execute seed (TEST/APPLY)
+    # ============================================================
+    if do_test or do_apply:
+        try:
+            if not norm_view_fqn:
+                raise ValueError("norm_view_fqn is not set. Build the NORM view in Step 5 first.")
 
-            mapping_df = _s6_default_parent_mapping_df(
+            _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
+            norm_view_sql = _norm_fqn_sql(norm_view_fqn)  # [dbo].[stg_v_norm_...]
+
+            missing_required = _s6_validate_required_columns(parent_cols_df, edited)
+            if missing_required:
+                raise ValueError(
+                    "Cannot seed: parent has NOT NULL columns with no mapping/constant: "
+                    + ", ".join(missing_required)
+                )
+
+            # ====================================================
+            # DEBUG — parent-of-parent FK violation (BLOCKING SEED)
+            # ====================================================
+            with st.expander("🔍 Debug: parent FK violations (blocking seed)", expanded=False):
+                try:
+                    dbg_sql = f"""
+                    SELECT DISTINCT
+                        su.STRAT_NAME_SET_ID
+                    FROM dbo.strat_unit su
+                    LEFT JOIN dbo.strat_name_set sns
+                        ON su.STRAT_NAME_SET_ID = sns.STRAT_NAME_SET_ID
+                    WHERE su.STRAT_NAME_SET_ID IS NOT NULL
+                      AND sns.STRAT_NAME_SET_ID IS NULL
+                    ORDER BY su.STRAT_NAME_SET_ID;
+                    """
+
+                    dbg_df = db.read_sql(conn, dbg_sql)
+
+                    if dbg_df.empty:
+                        st.success("✅ No missing STRAT_NAME_SET_ID values. Parent FK is satisfied.")
+                    else:
+                        st.error("❌ Missing STRAT_NAME_SET_ID values (this blocks seeding):")
+                        st.dataframe(dbg_df, hide_index=True, width="stretch")
+                        st.caption(
+                            "These values MUST exist in dbo.strat_name_set "
+                            "before dbo.strat_unit can be seeded."
+                        )
+
+                except Exception as dbg_e:
+                    st.warning(f"Debug query failed: {dbg_e}")
+
+            # ====================================================
+            # ACTUAL SEED SQL
+            # ====================================================
+            sql_seed = _s6_build_seed_insert_sql(
+                norm_view_sql=norm_view_sql,
+                parent_schema=ps,
+                parent_table=pt,
                 parent_cols_df=parent_cols_df,
                 parent_pk_cols=parent_pk_cols,
-                view_cols=view_cols,
-                fk_pairs_child_to_parent=fk_pairs_default,
-                loaded_map=loaded_map,
+                mapping_rows=edited,
+                created_by=created_by,
+                test_mode=bool(do_test),
+                view_cols_u=view_cols_u,
             )
 
-            st.subheader("Parent insert mapping (target columns ⇐ NORM view columns / constants)")
-            st.caption("Map columns (dropdown) or set constants. This supports compound keys.")
+            with st.expander("Generated seed SQL (debug)", expanded=False):
+                st.code(sql_seed, language="sql")
 
-            editor_cols = ["include", "is_pk", "target_column", "not_null", "source_column", "constant_value"]
-            col_config = {
-                "include": st.column_config.SelectboxColumn("Include", options=["Y", "N"], width="small"),
-                "is_pk": st.column_config.TextColumn("PK", disabled=True, width="small"),
-                "target_column": st.column_config.TextColumn("Target Column", disabled=True),
-                "not_null": st.column_config.TextColumn("NOT NULL", disabled=True, width="small"),
-                "source_column": st.column_config.SelectboxColumn("Source Column (NORM view)", options=[""] + view_cols),
-                "constant_value": st.column_config.TextColumn("Constant (optional)"),
-            }
+            out = db.read_sql(conn, sql_seed)
+            rows_ins = int(out.iloc[0]["rows_inserted"]) if (out is not None and not out.empty) else 0
 
-            edited = st.data_editor(
-                mapping_df[editor_cols],
-                hide_index=True,
-                width="stretch",
-                column_config=col_config,
-                key=f"s6_parent_mapping_editor__{ps}.{pt}",
+            if do_test:
+                st.success(f"TEST seed complete (rolled back). Would insert {rows_ins} row(s) into {ps}.{pt}.")
+            else:
+                st.success(f"APPLY seed complete. Inserted {rows_ins} row(s) into {ps}.{pt}.")
+                st.info("Now click 'Scan missing FK parents' again to refresh what remains.")
+
+        except Exception as e:
+            st.error(f"Seeding failed: {e}")
+            st.info(
+                "If this fails with an FK conflict ON THE PARENT, it means the parent depends on another table. "
+                "Seed the upstream parent first, then retry."
             )
 
-            b0, b1, b2 = st.columns([1, 1, 2])
-            do_save = b0.button("Save mapping", type="primary", key=f"s6_save_map__{ps}.{pt}")
-            do_test = b1.button("TEST seed (ROLLBACK)", key=f"s6_test_seed__{ps}.{pt}")
-            do_apply = b2.button("APPLY seed (COMMIT)", key=f"s6_apply_seed__{ps}.{pt}")
 
-            if do_save:
-                payload = {
-                    "table_schema": ps,
-                    "table_name": pt,
-                    "table_fqn": f"{ps}.{pt}",
-                    "pk_columns": parent_pk_cols,
-                    "grid_rows": edited.to_dict(orient="records"),
-                }
-                _s6_save_map(map_dir, ps, pt, payload)
-                st.success(f"Saved mapping: {str(_s6_map_path(map_dir, ps, pt))}")
+else:
+    # no mapping/seed UI rendered; keep page alive
+    pass
 
-            # ============================================================
-            # 6F — SQL used to detect missing (debug / reference)
-            # ============================================================
 
-            with st.expander("🔎 SQL used to detect missing FK values (debug)", expanded=False):
-                if fk_rows is None or fk_rows.empty:
-                    st.info("No FK rows available.")
-                else:
-                    first_row = fk_rows.iloc[0].to_dict()
-
-                    sql_count = str(first_row.get("sql_count", "") or "")
-                    sql_sample = str(first_row.get("sql_sample", "") or "")
-
-                    if not sql_count and not sql_sample:
-                        st.info("No SQL captured for this FK.")
-                    else:
-                        if sql_count:
-                            st.caption("Count missing rows")
-                            st.code(sql_count, language="sql")
-
-                        if sql_sample:
-                            st.caption("Sample missing rows")
-                            st.code(sql_sample, language="sql")
-                    
-            st.code(str(first_row.get("sql_sample", "")), language="sql")
-
-            # ============================================================
-            # 6G — Execute seed (TEST/APPLY)
-            # ============================================================
-            if do_test or do_apply:
-                try:
-                    norm_view_fqn = st.session_state.get("norm_view_fqn") or st.session_state.get("norm_view_name") or ""
-                    if not norm_view_fqn:
-                        st.error("norm_view_fqn is not set. Build the NORM view in Step 5 first.")
-                        raise ValueError("norm_view_fqn missing")
-
-                    _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
-
-                    missing_required = _s6_validate_required_columns(parent_cols_df, edited)
-                    if missing_required:
-                        st.error(
-                            "Cannot seed: parent table has NOT NULL columns with no mapping/constant: "
-                            + ", ".join(missing_required)
-                        )
-                        st.info("Map these columns or add constants, then retry.")
-                        raise ValueError("missing required parent mappings")
-
-                    sql_seed = _s6_build_seed_insert_sql(
-                        norm_view_fqn=norm_view_fqn,
-                        parent_schema=ps,
-                        parent_table=pt,
-                        parent_cols_df=parent_cols_df,
-                        parent_pk_cols=parent_pk_cols,
-                        fk_pairs=fk_pairs_default,
-                        mapping_rows=edited,
-                        created_by=created_by,
-                        test_mode=bool(do_test),
-                    )
-
-                    st.caption("Generated seed SQL:")
-                    st.code(sql_seed, language="sql")
-
-                    out = db.read_sql(conn, sql_seed)
-                    rows_ins = int(out.iloc[0]["rows_inserted"]) if (out is not None and not out.empty) else 0
-
-                    if do_test:
-                        st.success(f"TEST seed complete (rolled back). Would insert {rows_ins} row(s) into {ps}.{pt}.")
-                    else:
-                        st.success(f"APPLY seed complete. Inserted {rows_ins} row(s) into {ps}.{pt}.")
-                        st.info("Now go back to Step 6B and click 'Scan missing FK parents' again to refresh what remains.")
-
-                except Exception as e:
-                    st.error(f"Seeding failed: {e}")
-                    st.info(
-                        "If this fails with an FK conflict on the PARENT itself, it means this parent depends on another table. "
-                        "Seed that upstream table first (or seed manually), then retry."
-                    )
 
 # ============================================================
 # STEP 7 — Promote (insert new OR merge/update)
@@ -1392,6 +1528,7 @@ if not norm_view_fqn:
 # Ensure schema-qualified and normalize to bracketed SQL-safe form
 nv_schema, nv_name = _require_schema_qualified(norm_view_fqn, "norm_view_fqn")
 norm_view = f"[{nv_schema}].[{nv_name}]"   # ✅ now Promote can use norm_view
+
 
 promote_mode = st.radio(
     "Promote mode",
@@ -1591,45 +1728,32 @@ exists_sql = " AND ".join(exists_preds)
 on_sql = " AND ".join(on_preds)
 
 # ============================================================
-# INSERT-ONLY SQL (current behavior)
+# INSERT-ONLY Promote UI (single, safe, no duplicates)
+#   - builds sql_count_insert/sql_insert BEFORE using them
+#   - guards if upstream vars aren't ready yet
 # ============================================================
-# ============================================================
-# INSERT-ONLY SQL (current behavior) — show behind expander
-# ============================================================
 
-with st.expander("🧾 Insert-only SQL (debug)", expanded=False):
-    st.caption("Would insert (count)")
-    st.code(sql_count_insert, language="sql")
+_required = [
+    "final_cols",
+    "norm_view",
+    "target_full",
+    "pk_not_null_sql",
+    "exists_sql",
+    "cross_apply_sql",
+    "_select_expr_insert",
+    "_qident",
+]
+_missing = [n for n in _required if n not in locals()]
 
-    st.caption("Insert SQL")
-    st.code(sql_insert, language="sql")
+if _missing:
+    with st.expander("🧾 Insert-only SQL (debug)", expanded=False):
+        st.info("Insert-only SQL not available yet. Missing: " + ", ".join(_missing))
+else:
+    # 1) Build SQL strings FIRST
+    col_sql_insert = ", ".join(_qident(c) for c in final_cols)
+    sel_sql_insert = ", ".join(f"{_select_expr_insert(c)} AS {_qident(c)}" for c in final_cols)
 
-# Optional: run count + run insert buttons
-c1, c2 = st.columns([1, 1])
-
-do_count = c1.button("Count would-insert rows", key=f"count_insert__{target_full}")
-do_insert = c2.button("Run INSERT-only", type="primary", key=f"run_insert__{target_full}")
-
-if do_count:
-    try:
-        df = db.read_sql(conn, sql_count_insert)
-        n = int(df.iloc[0]["would_insert"]) if df is not None and not df.empty else 0
-        st.info(f"Would insert: {n:,} row(s).")
-    except Exception as e:
-        st.error(f"Count failed: {e}")
-
-if do_insert:
-    try:
-        # If your db.exec_sql exists and returns nothing, use that instead.
-        db.exec_sql(conn, sql_insert)
-        st.success("INSERT-only completed.")
-    except Exception as e:
-        st.error(f"Insert failed: {e}")
-
-col_sql_insert = ", ".join(_qident(c) for c in final_cols)
-sel_sql_insert = ", ".join(f"{_select_expr_insert(c)} AS {_qident(c)}" for c in final_cols)
-
-sql_count_insert = f"""
+    sql_count_insert = f"""
 SET NOCOUNT ON;
 SELECT COUNT(*) AS would_insert
 FROM {norm_view} v
@@ -1642,49 +1766,7 @@ WHERE {pk_not_null_sql}
   );
 """.strip()
 
-sql_insert = f"""
-SET NOCOUNT ON;
-BEGIN TRAN;
-
-INSERT INTO {target_full} ({col_sql_insert})
-SELECT {sel_sql_insert}
-FROM {norm_view} v
-{cross_apply_sql}
-WHERE {pk_not_null_sql}
-  AND NOT EXISTS (
-      SELECT 1
-      FROM {target_full} t
-      WHERE {exists_sql}
-  );
-
-SELECT @@ROWCOUNT AS rows_inserted;
-
-COMMIT TRAN;
-""".strip()
-# ============================================================
-# INSERT-ONLY SQL (current behavior)
-# ============================================================
-
-# ---- Build SQL FIRST ----
-col_sql_insert = ", ".join(_qident(c) for c in final_cols)
-sel_sql_insert = ", ".join(
-    f"{_select_expr_insert(c)} AS {_qident(c)}" for c in final_cols
-)
-
-sql_count_insert = f"""
-SET NOCOUNT ON;
-SELECT COUNT(*) AS would_insert
-FROM {norm_view} v
-{cross_apply_sql}
-WHERE {pk_not_null_sql}
-  AND NOT EXISTS (
-      SELECT 1
-      FROM {target_full} t
-      WHERE {exists_sql}
-  );
-""".strip()
-
-sql_insert = f"""
+    sql_insert = f"""
 SET NOCOUNT ON;
 BEGIN TRAN;
 
@@ -1704,43 +1786,33 @@ SELECT @@ROWCOUNT AS rows_inserted;
 COMMIT TRAN;
 """.strip()
 
-# ---- UI (behind expander) ----
-with st.expander("🧾 Insert-only SQL (debug)", expanded=False):
-    st.caption("Would insert (count)")
-    st.code(sql_count_insert, language="sql")
+    # 2) Buttons
+    c1, c2 = st.columns([1, 1])
+    do_count = c1.button("Count would-insert rows", key=f"count_insert__{target_full}")
+    do_insert = c2.button("Run INSERT-only", type="primary", key=f"run_insert__{target_full}")
 
-    st.caption("Insert SQL")
-    st.code(sql_insert, language="sql")
+    if do_count:
+        try:
+            df = db.read_sql(conn, sql_count_insert)
+            n = int(df.iloc[0]["would_insert"]) if (df is not None and not df.empty) else 0
+            st.info(f"Would insert: {n:,} row(s).")
+        except Exception as e:
+            st.error(f"Count failed: {e}")
 
-# ---- Actions ----
-c1, c2 = st.columns([1, 1])
+    if do_insert:
+        try:
+            db.exec_sql(conn, sql_insert)
+            st.success("INSERT-only completed.")
+        except Exception as e:
+            st.error(f"Insert failed: {e}")
 
-do_count = c1.button(
-    "Count would-insert rows",
-    key=f"count_insert__{target_full}"
-)
+    # 3) Debug expander (last)
+    with st.expander("🧾 Insert-only SQL (debug)", expanded=False):
+        st.caption("Would insert (count)")
+        st.code(sql_count_insert, language="sql")
 
-do_insert = c2.button(
-    "Run INSERT-only",
-    type="primary",
-    key=f"run_insert__{target_full}"
-)
-
-if do_count:
-    try:
-        df = db.read_sql(conn, sql_count_insert)
-        n = int(df.iloc[0]["would_insert"]) if df is not None and not df.empty else 0
-        st.info(f"Would insert: {n:,} row(s).")
-    except Exception as e:
-        st.error(f"Count failed: {e}")
-
-if do_insert:
-    try:
-        out = db.read_sql(conn, sql_insert)
-        rows = int(out.iloc[0]["rows_inserted"]) if out is not None and not out.empty else 0
-        st.success(f"INSERT-only completed. Inserted {rows:,} row(s).")
-    except Exception as e:
-        st.error(f"Insert failed: {e}")
+        st.caption("Insert SQL")
+        st.code(sql_insert, language="sql")
 
 
 # ============================================================
@@ -1863,6 +1935,24 @@ WHEN NOT MATCHED BY TARGET THEN
     VALUES ({", ".join([_insert_value_expr(c) for c in final_cols])});
 """.strip()
 
+# -----------------------------
+# Promote SQL must exist before Buttons render
+# -----------------------------
+sql_count_insert = locals().get("sql_count_insert", None)
+sql_insert = locals().get("sql_insert", None)
+sql_preview_merge = locals().get("sql_preview_merge", None)
+sql_merge = locals().get("sql_merge", None)
+
+# If we don't have the SQL yet, don't render the promote buttons/expanders.
+# This prevents NameError during partial code paths.
+if promote_mode == "Insert new only":
+    if not sql_count_insert or not sql_insert:
+        st.warning("Promote SQL not ready yet (insert-only). Build SQL above this section first.")
+        st.stop()
+else:
+    if not sql_preview_merge or not sql_merge:
+        st.warning("Promote SQL not ready yet (merge/update). Build SQL above this section first.")
+        st.stop()
 
 # -----------------------------
 # Buttons
