@@ -1,0 +1,378 @@
+# ppdm_viewer.py
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Set, Tuple, Optional, List
+
+import streamlit as st
+import fitz  # PyMuPDF
+import pandas as pd
+from PIL import Image
+
+# Optional dependency:
+#   pip install streamlit-image-zoom
+try:
+    from streamlit_image_zoom import image_zoom
+except Exception:
+    image_zoom = None
+
+
+# ----------------------------
+# Config
+# ----------------------------
+PDF_DIR = Path("docs/schema_pdfs")  # align with your project
+PDF_DIR.mkdir(parents=True, exist_ok=True)
+
+BOOKMARKS_OUT = PDF_DIR / "bookmarks.json"  # standard viewer format
+
+# Heading: mostly ALL CAPS with punctuation
+HEADING_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9 /&\-\+()]*[A-Z0-9)]$")
+
+# Table patterns (more forgiving):
+# - dbo.table_name
+# - TABLE_NAME (PPDM39)
+# - TABLE_NAME (PPDMLite) etc
+TABLE_PATTERNS = [
+    re.compile(r"^(dbo\.[A-Za-z0-9_]+)\b"),
+    re.compile(r"^([A-Z0-9_]+)\s*\((PPDM39|PPDM|PPDMLITE|LITE)\)", re.IGNORECASE),
+    re.compile(r"^([A-Z0-9_]+)\s*$"),  # fallback (last resort; can be noisy)
+]
+
+# Lines we never want as headings
+HEADING_BLACKLIST_SUBSTR = [
+    "PPDM 3.9",
+    "DIAGRAMS LEGEND",
+    "PROFESSIONAL PETROLEUM",
+    "PUBLIC PETROLEUM",
+    "DATA MODEL",
+    "TABLE OF CONTENTS",
+]
+
+
+@dataclass
+class ExtractedStructure:
+    headings_to_tables: Dict[str, Set[str]]
+    heading_to_page: Dict[str, int]
+    table_to_pages: Dict[str, Set[int]]
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
+def _clean_heading(s: str) -> str:
+    return (s or "").strip()
+
+
+def _is_heading_candidate(line: str) -> bool:
+    if not line:
+        return False
+    if not HEADING_PATTERN.match(line):
+        return False
+    up = line.upper()
+    for bad in HEADING_BLACKLIST_SUBSTR:
+        if bad in up:
+            return False
+    return True
+
+
+def _extract_tables_from_lines(lines: List[str]) -> Set[str]:
+    found: Set[str] = set()
+    for line in lines:
+        l = line.strip()
+        if not l:
+            continue
+
+        # Try patterns in order
+        for pat in TABLE_PATTERNS[:2]:
+            m = pat.match(l)
+            if m:
+                tbl = m.group(1).strip()
+                # normalize to dbo.<name> when possible
+                if not tbl.lower().startswith("dbo.") and re.fullmatch(r"[A-Z0-9_]+", tbl):
+                    # Keep uppercase raw name; you can map later if desired
+                    pass
+                found.add(tbl)
+                break
+
+        # Avoid the very loose fallback unless it looks table-ish
+        # (You can enable if needed, but it can create noise.)
+        # else:
+        #     m = TABLE_PATTERNS[2].match(l)
+        #     if m and re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", m.group(1)):
+        #         found.add(m.group(1))
+
+    return found
+
+
+@st.cache_resource(show_spinner=False)
+def _open_pdf(pdf_path: str) -> fitz.Document:
+    return fitz.open(pdf_path)
+
+
+@st.cache_data(show_spinner=True)
+def extract_structure(pdf_path_str: str) -> ExtractedStructure:
+    pdf_path = Path(pdf_path_str)
+    doc = fitz.open(pdf_path)
+
+    headings_to_tables: Dict[str, Set[str]] = {}
+    heading_to_page: Dict[str, int] = {}
+    table_to_pages: Dict[str, Set[int]] = {}
+
+    for page_idx, page in enumerate(doc):
+        text = page.get_text("text") or ""
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+        current_heading: Optional[str] = None
+
+        # Find heading near the top (scan first 15 lines)
+        for line in lines[:15]:
+            if _is_heading_candidate(line):
+                current_heading = _clean_heading(line)
+                headings_to_tables.setdefault(current_heading, set())
+                heading_to_page.setdefault(current_heading, page_idx)
+                break
+
+        # Find tables anywhere on page
+        tables_on_page = _extract_tables_from_lines(lines)
+
+        for tbl in tables_on_page:
+            table_to_pages.setdefault(tbl, set()).add(page_idx)
+            if current_heading:
+                headings_to_tables.setdefault(current_heading, set()).add(tbl)
+
+    return ExtractedStructure(
+        headings_to_tables=headings_to_tables,
+        heading_to_page=heading_to_page,
+        table_to_pages=table_to_pages,
+    )
+
+
+def _list_tables(headings_to_tables: Dict[str, Set[str]]) -> List[str]:
+    s: Set[str] = set()
+    for tbls in headings_to_tables.values():
+        s.update(tbls)
+    return sorted(s)
+
+
+def _to_dataframe(headings_to_tables: Dict[str, Set[str]]) -> pd.DataFrame:
+    rows = []
+    for heading, tables in sorted(headings_to_tables.items()):
+        if not tables:
+            continue
+        rows.append({"Heading": heading.strip(), "Tables": ", ".join(sorted(tables))})
+    return pd.DataFrame(rows)
+
+
+def _render_page(doc: fitz.Document, page_idx: int, zoom_mode: str, hq_scale: float) -> None:
+    page = doc[page_idx]
+
+    if zoom_mode.startswith("Fast"):
+        base_scale = 1.5
+        caption_extra = "Fast mode (image zoom only – may pixelate at high zoom)"
+    else:
+        base_scale = float(hq_scale)
+        caption_extra = f"High-quality mode (PDF re-render at scale {base_scale:.1f}×)"
+
+    mat = fitz.Matrix(base_scale, base_scale)
+    pix = page.get_pixmap(matrix=mat)
+
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+
+    st.caption(f"Page {page_idx + 1} — {caption_extra}")
+
+    if image_zoom is not None:
+        image_zoom(
+            img,
+            mode="both",
+            size=(min(img.width, 1800), min(img.height, 1200)),
+        )
+    else:
+        st.warning("Optional dependency missing: streamlit-image-zoom. Showing static image.")
+        st.image(img, use_container_width=True)
+
+
+def _export_bookmarks_json(
+    pdf_name: str,
+    structure: ExtractedStructure,
+    out_path: Path,
+    default_table_link: str = "",
+) -> None:
+    """
+    Export bookmarks.json in the format your ERD Viewer sidebar expects:
+      { "PDF_NAME.pdf": { "Section": { "page": <int>, "table": "", "tables": [] }, ... } }
+    """
+    payload = {}
+    if out_path.exists():
+        try:
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+
+    pdf_block = payload.get(pdf_name, {})
+    if not isinstance(pdf_block, dict):
+        pdf_block = {}
+
+    for heading, page_idx in structure.heading_to_page.items():
+        # keep existing if present, otherwise set
+        if heading not in pdf_block:
+            pdf_block[heading] = {
+                "page": int(page_idx) + 1,  # bookmarks are 1-based for humans
+                "category": heading,
+                "table": default_table_link or "",
+                "tables": [],
+            }
+        else:
+            # ensure it has a page
+            try:
+                pdf_block[heading]["page"] = int(pdf_block[heading].get("page") or (page_idx + 1))
+            except Exception:
+                pdf_block[heading]["page"] = int(page_idx) + 1
+
+    payload[pdf_name] = pdf_block
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+# ----------------------------
+# Main UI
+# ----------------------------
+def ppdm_diagram_viewer():
+    st.subheader("PPDM ERD Diagram Navigator (image-rendered)")
+
+    pdf_files = sorted(PDF_DIR.glob("*.pdf"))
+    if not pdf_files:
+        st.info(f"No PDFs found in {PDF_DIR.resolve()}. Put your ERD PDFs there.")
+        st.stop()
+
+    pdf_names = [p.name for p in pdf_files]
+
+    # session defaults
+    ss = st.session_state
+    ss.setdefault("erd_pdf_name", pdf_names[0])
+    ss.setdefault("erd_page", 1)
+    ss.setdefault("erd_section", "")
+    ss.setdefault("explorer_target_fqn", "")
+
+    # Pick PDF
+    col_nav, col_opts = st.columns([2, 1])
+
+    with col_opts:
+        zoom_mode = st.radio("Zoom quality", ["Fast (image zoom only)", "High quality (PDF re-render)"])
+        if zoom_mode.startswith("High"):
+            hq_scale = st.slider(
+                "PDF render scale",
+                min_value=2.0,
+                max_value=5.0,
+                value=3.0,
+                step=0.5,
+                help="Higher values = sharper but slower rendering.",
+            )
+        else:
+            hq_scale = 1.5
+
+        mode = st.radio("Go to:", ["By heading", "By table name", "By page number"])
+
+    with col_nav:
+        pdf_name = st.selectbox(
+            "Pick an ERD PDF",
+            pdf_names,
+            index=pdf_names.index(ss["erd_pdf_name"]) if ss["erd_pdf_name"] in pdf_names else 0,
+            key="ppdm_viewer_pdf",
+        )
+        ss["erd_pdf_name"] = pdf_name
+
+        pdf_path = PDF_DIR / pdf_name
+        if not pdf_path.exists():
+            st.error(f"PDF not found: {pdf_path.resolve()}")
+            st.stop()
+
+        structure = extract_structure(str(pdf_path))
+        headings = sorted(structure.headings_to_tables.keys())
+        tables = _list_tables(structure.headings_to_tables)
+
+        doc = _open_pdf(str(pdf_path))
+
+        page_idx: Optional[int] = None
+
+        if mode == "By heading":
+            if headings:
+                heading = st.selectbox("Choose heading", headings, key="ppdm_viewer_heading")
+                ss["erd_section"] = heading
+                page_idx = structure.heading_to_page.get(heading)
+
+                t_on = sorted(structure.headings_to_tables.get(heading, []))
+                st.markdown(f"**Heading:** {heading}")
+                if t_on:
+                    st.markdown("**Tables detected on this diagram:**")
+                    st.write(", ".join(t_on))
+            else:
+                st.warning("No headings detected in this PDF.")
+
+        elif mode == "By table name":
+            if tables:
+                table = st.selectbox("Choose table", tables, key="ppdm_viewer_table")
+                pages = sorted(structure.table_to_pages.get(table, []))
+                st.markdown(f"**Table:** {table}")
+                if not pages:
+                    st.warning("No pages found for this table.")
+                else:
+                    page_idx = st.selectbox(
+                        "Occurrences (page)",
+                        pages,
+                        key="ppdm_viewer_table_page",
+                        format_func=lambda p: f"Page {p + 1}",
+                    )
+            else:
+                st.warning("No tables detected in this PDF.")
+
+        elif mode == "By page number":
+            page_idx = int(
+                st.number_input(
+                    "Page number (1-based)",
+                    min_value=1,
+                    max_value=len(doc),
+                    value=min(max(int(ss.get("erd_page", 1)), 1), len(doc)),
+                    step=1,
+                    key="ppdm_viewer_page_num",
+                )
+            ) - 1
+
+        # Render selected page
+        if page_idx is not None:
+            ss["erd_page"] = int(page_idx) + 1
+            _render_page(doc, int(page_idx), zoom_mode, float(hq_scale))
+
+        # Link to Data Explorer
+        with st.expander("Link to Data Explorer", expanded=False):
+            link_table = st.text_input(
+                "Linked target table (schema.table)",
+                value=str(ss.get("explorer_target_fqn") or ""),
+                key="ppdm_viewer_link_table",
+                help="If set, ERD Viewer will share this with Data Explorer via session_state['explorer_target_fqn']",
+            )
+            if st.button("Set linked table", type="primary", key="ppdm_viewer_set_link"):
+                ss["explorer_target_fqn"] = (link_table or "").strip()
+                st.success(f"Linked table set: {ss['explorer_target_fqn'] or '(none)'}")
+
+        # Export bookmarks
+        with st.expander("Export bookmarks.json from detected headings", expanded=False):
+            st.write("This writes/updates:", str(BOOKMARKS_OUT.resolve()))
+            if st.button("Export bookmarks for this PDF", type="primary", key="ppdm_viewer_export_bm"):
+                _export_bookmarks_json(pdf_name, structure, BOOKMARKS_OUT)
+                st.success("Bookmarks exported/updated.")
+
+        # Data view
+        with st.expander("Heading → tables mapping (data view)", expanded=False):
+            df = _to_dataframe(structure.headings_to_tables)
+            st.dataframe(df, use_container_width=True)
+
+
+# If you want this file runnable directly:
+if __name__ == "__main__":
+    st.set_page_config(page_title="PPDM ERD Viewer (Image Render)", layout="wide")
+    ppdm_diagram_viewer()

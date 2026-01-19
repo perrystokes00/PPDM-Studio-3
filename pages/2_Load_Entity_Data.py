@@ -111,6 +111,53 @@ def _require_schema_qualified(fqn: str, label: str = "object") -> tuple[str, str
     a, b = fqn.split(".", 1)
     return a.strip(), b.strip()
 
+def _rows_to_tables(rows: list[dict]) -> list[dict]:
+    """
+    Convert row-wise schema registry into table-wise structure.
+
+    Input rows look like:
+      {table_schema, table_name, column_name, data_type, not_null, is_primary_key, is_foreign_key, ...}
+
+    Output:
+      [{"name":"dbo.well", "columns":[{"name":"UWI", ...}, ...]}, ...]
+    """
+    tables: dict[str, dict] = {}
+
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+
+        schema = r.get("table_schema") or r.get("TABLE_SCHEMA") or r.get("schema") or "dbo"
+        table  = r.get("table_name")   or r.get("TABLE_NAME")   or r.get("table")
+        col    = r.get("column_name")  or r.get("COLUMN_NAME")  or r.get("column")
+
+        if not table:
+            continue
+
+        fqn = f"{schema}.{table}"
+        t = tables.setdefault(fqn, {"name": fqn, "columns": []})
+
+        # If there is a column name, add it
+        if col:
+            t["columns"].append(
+                {
+                    "name": col,
+                    "data_type": r.get("data_type") or r.get("DATA_TYPE"),
+                    "not_null": r.get("not_null") or r.get("IS_NULLABLE"),
+                    "is_primary_key": r.get("is_primary_key"),
+                    "is_foreign_key": r.get("is_foreign_key"),
+                    "fk_table_schema": r.get("fk_table_schema"),
+                    "fk_table_name": r.get("fk_table_name"),
+                    "fk_column_name": r.get("fk_column_name"),
+                    "check_constraints": r.get("check_constraints"),
+                    "category": r.get("category"),
+                    "sub_category": r.get("sub_category"),
+                    "model": r.get("model"),
+                }
+            )
+
+    return list(tables.values())
+
 # ============================================================
 # UI
 # ============================================================
@@ -159,7 +206,14 @@ if uploaded is not None:
         )
         if not has_header:
             df_preview.columns = [f"COL_{i+1}" for i in range(len(df_preview.columns))]
-        st.dataframe(df_preview, hide_index=True, width="stretch")
+
+        with st.expander("Raw data preview (first 10 rows)", expanded=False):
+            st.dataframe(
+                df_preview.head(10),
+                hide_index=True,
+                width='stretch',
+            )
+
         st.caption(f"Delimiter={repr(delimiter)} RowTerm={rowterm_sql} Cols={len(df_preview.columns)}")
     except Exception as e:
         st.error(f"Preview failed: {e}")
@@ -197,11 +251,23 @@ if st.button("Stage", type="primary", key="entity_stage_btn"):
         st.success(f"Staged. Columns detected: {len(cols)}")
 
         cnt = db.read_sql(conn, "SELECT COUNT(*) AS n FROM stg.raw_data;")
-        st.dataframe(_safe_df(cnt), hide_index=True, width="stretch")
+        total_rows = int(cnt.iloc[0]["n"])
 
-        prev = db.read_sql(conn, "SELECT TOP (10) * FROM stg.v_raw_with_rid ORDER BY RID;")
-        st.subheader("stg.v_raw_with_rid (top 10)")
-        st.dataframe(_safe_df(prev), hide_index=True, width="stretch")
+        st.caption(f"Rows staged: {total_rows:,}")
+        
+        prev = db.read_sql(
+            conn,
+            "SELECT TOP (10) * FROM stg.v_raw_with_rid ORDER BY RID;"
+        )
+
+        st.caption("stg.v_raw_with_rid — first 10 rows")
+
+        with st.expander("View bulk data preview", expanded=False):
+            st.dataframe(
+                _safe_df(prev),
+                hide_index=True,
+                width='stretch',
+            )
     except Exception as e:
         st.error(f"Stage failed: {e}")
         st.stop()
@@ -215,6 +281,16 @@ if not source_cols:
 # STEP 3 — Choose Primary Table (child)
 # ============================================================
 st.header("Step 3 — Choose Primary Table (child)")
+# Apply recommended-table selection BEFORE widget instantiation
+if "primary_fqn_pending" in st.session_state:
+    pick = st.session_state.pop("primary_fqn_pending")
+
+    # Set both your source-of-truth and the widget key BEFORE it renders
+    st.session_state["primary_table_fqn"] = pick
+    st.session_state["primary_fqn"] = pick
+
+    # Optional: force reset detection cleanly
+    st.session_state.pop("primary_fqn_prev", None)
 
 primary_fqn = st.text_input(
     "Primary table (schema.table)",
@@ -222,33 +298,76 @@ primary_fqn = st.text_input(
     key="primary_fqn",
 )
 st.session_state["primary_table_fqn"] = primary_fqn
+
 # --- RESET dependent state when primary table changes ---
 ss = st.session_state
 prev = ss.get("primary_fqn_prev")
 if prev != primary_fqn:
     ss["primary_fqn_prev"] = primary_fqn
 
-    # clear downstream state that depends on table choice
     for k in [
         "primary_map_df",
         "primary_map_grid",
         "norm_view_name",
+        "norm_view_fqn",
         "entity_fk_cols",
         "entity_fk_pairs",
+        "table_recos_df",
+        "catalog_tables",
+        "catalog_root_key",
     ]:
-        if k in ss:
-            del ss[k]
-
-    # optional: also clear staged-column auto-mapping guesses if you store them
-    # ss.pop("entity_source_cols", None)
+        ss.pop(k, None)
 
     st.info(f"Primary table changed: {prev} → {primary_fqn}. Resetting mapping / view.")
     st.rerun()
 
+# --- Validate primary_fqn ---
 if "." not in primary_fqn:
     st.error("Enter primary table like dbo.well_dir_srvy")
     st.stop()
 
+# --- Load / normalize catalog tables ONCE (PPDM 3.9 + Lite supported) ---
+catalog_tables = ss.get("catalog_tables")
+
+if not isinstance(catalog_tables, list) or not catalog_tables:
+    catalog_json = ss.get("catalog_json")
+
+    if not isinstance(catalog_json, dict):
+        st.warning("Catalog JSON not loaded yet (table recommendations will be unavailable).")
+        catalog_tables = []
+    else:
+        root_keys = (
+            "ppdm_39_schema_domain",
+            "ppdm_lite_schema_domain",
+            "ppdm_lite_schema_catalog",
+            "rows",
+            "data",
+            "items",
+        )
+
+        rows = []
+        used_root = None
+        for k in root_keys:
+            v = catalog_json.get(k)
+            if isinstance(v, list) and v:
+                rows = v
+                used_root = k
+                break
+
+        if not rows:
+            st.warning(
+                "Catalog JSON missing expected root list (table recommendations will be unavailable). "
+                "Expected one of: ppdm_39_schema_domain / ppdm_lite_schema_domain / ppdm_lite_schema_catalog / rows."
+            )
+            st.write("Top-level keys:", list(catalog_json.keys())[:50])
+            catalog_tables = []
+        else:
+            catalog_tables = _rows_to_tables(rows)
+            ss["catalog_tables"] = catalog_tables
+            ss["catalog_root_key"] = used_root
+            st.caption(f"Catalog root: {used_root}")
+
+# --- Load target table columns ---
 child_schema, child_table = primary_fqn.split(".", 1)
 child_cols_df = _fetch_child_columns(conn, child_schema, child_table)
 
@@ -258,45 +377,40 @@ if child_cols_df.empty:
 
 child_columns = child_cols_df["column_name"].astype(str).tolist()
 st.caption("Next you will map staged columns → primary table columns and build the NORM view.")
+
+# ============================================================
+# Suggested tables (from staged columns)
+# ============================================================
 st.subheader("Suggested tables (from staged columns)")
 
 if st.button("Recommend tables", key="btn_recommend_tables"):
     try:
-        # Simple overlap-based suggestion (no extra modules required)
-        src_set = {c.strip().upper() for c in source_cols}
+        src_set = {c.strip().upper() for c in source_cols if str(c).strip()}
 
-        # Use your loaded catalog_json if present
-        cat = st.session_state.get("catalog_json") or {}
-        rows = []
-
-        # Expect catalog to be either {"tables":[...]} or list-like; adapt lightly:
-        tables = cat.get("tables") if isinstance(cat, dict) else None
-        if tables is None and isinstance(cat, list):
-            tables = cat
-
-        if not tables:
-            st.warning("No tables found in catalog_json. Check catalog structure.")
+        if not catalog_tables:
+            st.warning("No catalog tables available for recommendations. Load/select a catalog first.")
         else:
-            for t in tables:
-                # try common shapes:
-                fqn = t.get("name") or t.get("table") or t.get("fqn")
+            rows_out = []
+
+            for t in catalog_tables:
+                fqn = t.get("name")  # e.g. "dbo.anl_accuracy"
                 cols = t.get("columns") or []
-                col_names = []
-                for cc in cols:
-                    if isinstance(cc, dict):
-                        col_names.append(str(cc.get("name", "")).strip())
-                    else:
-                        col_names.append(str(cc).strip())
+
+                col_names = [
+                    (cc.get("name") if isinstance(cc, dict) else str(cc)).strip()
+                    for cc in cols
+                    if (cc.get("name") if isinstance(cc, dict) else str(cc)).strip()
+                ]
 
                 if not fqn or not col_names:
                     continue
 
-                tgt_set = {c.upper() for c in col_names if c}
+                tgt_set = {c.upper() for c in col_names}
                 overlap = len(src_set & tgt_set)
                 if overlap <= 0:
                     continue
 
-                rows.append(
+                rows_out.append(
                     {
                         "table": fqn,
                         "overlap": overlap,
@@ -305,23 +419,36 @@ if st.button("Recommend tables", key="btn_recommend_tables"):
                     }
                 )
 
-            df = pd.DataFrame(rows).sort_values(["overlap", "pct"], ascending=False).head(25)
-            st.session_state["table_recos_df"] = df
+            df = (
+                pd.DataFrame(rows_out)
+                .sort_values(["overlap", "pct"], ascending=False)
+                .head(25)
+            )
+
+            ss["table_recos_df"] = df
 
     except Exception as e:
         st.error(f"Recommend failed: {e}")
 
-recos = st.session_state.get("table_recos_df")
+recos = ss.get("table_recos_df")
 if isinstance(recos, pd.DataFrame) and not recos.empty:
-    st.dataframe(recos, hide_index=True, width="stretch")
-    pick = st.selectbox("Pick a suggested table", recos["table"].tolist(), key="pick_reco_table")
-    if st.button("Use selected table", type="primary", key="btn_apply_reco"):
-        st.session_state["primary_table_fqn"] = pick
-        st.session_state["primary_fqn"] = pick  # sync text_input key
-        st.success(f"Primary table set to {pick}")
-        st.rerun()
+    with st.expander(f"Suggested tables ({len(recos):,})", expanded=False):
+        st.dataframe(recos, hide_index=True, width='stretch')
+
+        pick = st.selectbox(
+            "Pick a suggested table",
+            recos["table"].tolist(),
+            key="pick_reco_table",
+        )
+
+        if st.button("Use selected table", type="primary", key="btn_apply_reco"):
+            st.session_state["primary_fqn_pending"] = pick
+            st.success(f"Primary table set to {pick}")
+            st.rerun()
+
 else:
     st.caption("No suggestions yet. Click “Recommend tables”.")
+
 
 # ============================================================
 # STEP 4 — Mapping grid (primary)  ✅ stable + batch edits
@@ -396,7 +523,7 @@ if clear_fk:
 with st.form("primary_map_form", clear_on_submit=False, border=True):
     edited_df = st.data_editor(
         ss["primary_map_df"],
-        width="stretch",          # ✅ Streamlit 2026+ replacement for use_container_width=True
+        width="stretch",          # ✅ Streamlit 2026+ replacement for width='stretch'
         num_rows="fixed",
         column_config={
             "treat_as_fk": st.column_config.CheckboxColumn("FK", help="Treat as FK (QC / optional seeding)"),
@@ -496,9 +623,12 @@ if st.button("Build NORM view", type="primary", key="build_norm_btn"):
         st.success(f"Built NORM view: {st.session_state['norm_view_fqn']}")
         st.code(st.session_state["norm_view_fqn"])
 
-        prev = db.read_sql(conn, f"SELECT TOP (25) * FROM {st.session_state['norm_view_fqn']} ORDER BY RID;")
-        st.subheader("NORM view preview (top 25)")
-        st.dataframe(_safe_df(prev), hide_index=True, width="stretch")
+        with st.expander("NORM view preview (first 10 rows)", expanded=False):
+            prev = db.read_sql(
+                conn,
+                f"SELECT TOP (10) * FROM {st.session_state['norm_view_fqn']} ORDER BY RID;"
+            )
+            st.dataframe(_safe_df(prev), hide_index=True, width='stretch')
 
     except Exception as e:
         st.error(f"Build NORM view failed: {e}")
